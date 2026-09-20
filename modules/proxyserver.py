@@ -105,66 +105,36 @@ class AsyncProxyServer:
         self.last_switch_attempt = 0
 
     def _handle_mode_change(self):
-        
         self.last_switch_attempt = 0
-        
         if self.use_getip:
             self.proxies = []
             self.proxy_cycle = None
             self.current_proxy = None
             logging.info(get_message('api_mode_notice', self.language))
         else:
-            logging.info(f"切换到{'负载均衡' if self.mode == 'loadbalance' else '循环模式'}模式，从 {self.proxy_file} 加载代理列表")
-            self.proxies = self._load_file_proxies()
-            logging.info(f"加载到 {len(self.proxies)} 个代理")
-            
-            if self.proxies:
-                self.proxy_cycle = cycle(self.proxies)
-                self.current_proxy = next(self.proxy_cycle)
-                logging.info(f"当前使用代理: {self.current_proxy}")
-                
-                if self.check_proxies and self.mode != 'loadbalance':  
-                    try:
-                        
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            asyncio.create_task(self._check_proxies_wrapper())
-                        else:
-                            loop.run_until_complete(self._check_proxies())
-                    except Exception as e:
-                        logging.error(f"检查代理时出错: {str(e)}")
-            else:
-                logging.error(f"从文件 {self.proxy_file} 加载代理失败，请检查文件是否存在且包含有效代理")
+            self._reload_proxies()
 
     async def _check_proxies_wrapper(self):
         """包装 _check_proxies 方法，用于在已运行的事件循环中调用"""
         await self._check_proxies()
 
     def _reload_proxies(self):
-        
+        """Reload the configured proxy file and atomically replace selection state."""
         self.last_switch_attempt = 0
-        
         logging.info(f"重新加载代理列表文件 {self.proxy_file}")
-        self.proxies = self._load_file_proxies()
-        logging.info(f"加载到 {len(self.proxies)} 个代理")
-        
-        if self.proxies:
-            self.proxy_cycle = cycle(self.proxies)
-            self.current_proxy = next(self.proxy_cycle)
-            logging.info(f"当前使用代理: {self.current_proxy}")
-            
-            if self.check_proxies:
-                try:
-                    
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.create_task(self._check_proxies_wrapper())
-                    else:
-                        loop.run_until_complete(self._check_proxies())
-                except Exception as e:
-                    logging.error(f"检查代理时出错: {str(e)}")
-        else:
+        new_proxies = self._load_file_proxies()
+        if not new_proxies:
             logging.error(f"从文件 {self.proxy_file} 加载代理失败，请检查文件是否存在且包含有效代理")
+            return False
+
+        self.proxies = new_proxies
+        self.proxy_cycle = cycle(new_proxies)
+        self.current_proxy = next(self.proxy_cycle)
+        self.last_switch_time = time.time()
+        self.proxy_check_cache.clear()
+        self.last_check_time.clear()
+        logging.info(f"加载到 {len(new_proxies)} 个格式有效的代理，当前使用: {self.current_proxy}")
+        return True
 
     async def _check_proxies(self):
         from modules.modules import check_proxies
@@ -179,7 +149,11 @@ class AsyncProxyServer:
             proxy_file = os.path.join('config', os.path.basename(self.proxy_file))
             if os.path.exists(proxy_file):
                 with open(proxy_file, 'r', encoding='utf-8') as f:
-                    proxies = [line.strip() for line in f if line.strip()]
+                    candidates = [line.strip() for line in f if line.strip()]
+                proxies = [proxy for proxy in candidates if validate_proxy(proxy)]
+                invalid_count = len(candidates) - len(proxies)
+                if invalid_count:
+                    logging.warning(f"忽略 {invalid_count} 条格式无效的代理地址")
                 return proxies
             else:
                 logging.error(get_message('proxy_file_not_found', self.language, proxy_file))
@@ -262,39 +236,15 @@ class AsyncProxyServer:
             
             
             if self.mode == 'loadbalance' and self.proxies:
-                if not self.switching_proxy:
-                    try:
-                        self.switching_proxy = True
-                        self.last_switch_attempt = current_time  
-                        
-                        if not self.use_getip:
-                            
-                            if not self.proxy_cycle:
-                                self.proxy_cycle = cycle(self.proxies)
-                            self.current_proxy = next(self.proxy_cycle)
-                            logging.info(f"负载均衡模式选择代理: {self.current_proxy}")
-                        else:
-                            
-                            await self.get_proxy()
-                    finally:
-                        self.switching_proxy = False
-                return self.current_proxy
+                return await self.get_proxy(force=True)
             
             
             if self.switching_proxy or (current_time - self.last_switch_attempt < self.switch_cooldown):
                 return self.current_proxy
             
-            if self.interval > 0 and current_time - self.last_switch_time >= self.interval or \
-               (self.use_getip and not self.current_proxy):
-                try:
-                    self.switching_proxy = True
-                    self.last_switch_attempt = current_time
-                    old_proxy = self.current_proxy
-                    
-                    await self.get_proxy()
-
-                finally:
-                    self.switching_proxy = False
+            if ((self.interval > 0 and current_time - self.last_switch_time >= self.interval) or
+                    (self.use_getip and not self.current_proxy)):
+                await self.get_proxy()
             
             return self.current_proxy
                     
@@ -304,16 +254,16 @@ class AsyncProxyServer:
             return self.current_proxy
 
     async def _load_getip_proxy(self):
-        valid_proxies = []
         for _ in range(4):
-            new_ip = getip.newip()
+            try:
+                new_ip = await asyncio.to_thread(getip.newip)
+            except Exception as error:
+                logging.warning(get_message('proxy_get_error', self.language, str(error)))
+                continue
             if validate_proxy(new_ip):
-                valid_proxies.append(new_ip)
-                break
-        else:
-            logging.error(get_message('multiple_proxy_fail', self.language))
-            exit(1)
-        return valid_proxies[0]
+                return new_ip
+        logging.error(get_message('multiple_proxy_fail', self.language))
+        return None
 
     def time_until_next_switch(self):
         return float('inf') if self.mode == 'loadbalance' else max(0, self.interval - (time.time() - self.last_switch_time))
@@ -1121,16 +1071,11 @@ class AsyncProxyServer:
             if self.switching_proxy:
                 return False
                 
-            self.switching_proxy = True
-            self.last_switch_attempt = current_time
             old_proxy = self.current_proxy
-            
-            temp_current_proxy = self.current_proxy
-            
-            await self.get_proxy()
+            await self.get_proxy(force=True)
             
             
-            if temp_current_proxy != self.current_proxy:
+            if old_proxy != self.current_proxy:
                 self._log_proxy_switch(old_proxy, self.current_proxy)
                 
                 self.last_proxy_failure_time = current_time
@@ -1357,16 +1302,20 @@ class AsyncProxyServer:
     async def _validate_proxy(self, proxy):
         if not proxy:
             return False
-            
-        
+
+        if not validate_proxy(proxy):
+            logging.warning(get_message('proxy_invalid', self.language, proxy))
+            self.proxy_check_cache[proxy] = (time.time(), False)
+            return False
+
         if not self.check_proxies:
             return True
             
+        cached = self.proxy_check_cache.get(proxy)
+        if cached and time.time() - cached[0] < self.proxy_check_ttl:
+            return cached[1]
+
         try:
-            if not validate_proxy(proxy):
-                logging.warning(get_message('proxy_invalid', self.language, proxy))
-                return False
-                
             proxy_type, proxy_addr = proxy.split('://')
             proxy_auth, proxy_host_port = self._split_proxy_auth(proxy_addr)
             proxy_host, proxy_port = proxy_host_port.split(':')
@@ -1382,29 +1331,37 @@ class AsyncProxyServer:
                     await writer.wait_closed()
                 except:
                     pass
+                self.proxy_check_cache[proxy] = (time.time(), True)
                 return True
             except:
+                self.proxy_check_cache[proxy] = (time.time(), False)
                 return False
                 
         except Exception as e:
             logging.error(get_message('proxy_check_failed', self.language, proxy, str(e)))
             return False
 
-    async def get_proxy(self):
+    async def get_proxy(self, force=False):
+        """Select the next usable proxy without allowing the switch flag to self-block."""
         try:
+            if self.switching_proxy and not force:
+                return self.current_proxy
+
+            self.switching_proxy = True
+            self.last_switch_attempt = time.time()
             old_proxy = self.current_proxy
-            temp_current_proxy = self.current_proxy
-            
             if not self.use_getip and self.proxies:
                 if not self.proxy_cycle:
                     self.proxy_cycle = cycle(self.proxies)
-                    
-                for _ in range(3):
+
+                for _ in range(len(self.proxies)):
                     new_proxy = next(self.proxy_cycle)
+                    if len(self.proxies) > 1 and new_proxy == self.current_proxy:
+                        continue
                     if await self._validate_proxy(new_proxy):
                         self.current_proxy = new_proxy
                         self.last_switch_time = time.time()
-                        if temp_current_proxy != self.current_proxy:
+                        if old_proxy != self.current_proxy:
                             self._log_proxy_switch(old_proxy, self.current_proxy)
                         return self.current_proxy
                         
@@ -1418,7 +1375,7 @@ class AsyncProxyServer:
 
                         self.current_proxy = new_proxy
                         self.last_switch_time = time.time()
-                        if temp_current_proxy != self.current_proxy:
+                        if old_proxy != self.current_proxy:
                             self._log_proxy_switch(old_proxy, self.current_proxy)
                         return self.current_proxy
                     else:
@@ -1431,6 +1388,8 @@ class AsyncProxyServer:
         except Exception as e:
             logging.error(get_message('proxy_get_error', self.language, str(e)))
             return self.current_proxy
+        finally:
+            self.switching_proxy = False
 
     async def cleanup_clients(self):
         while True:

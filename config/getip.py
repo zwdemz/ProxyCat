@@ -20,22 +20,22 @@ def newip():
             raise ValueError('getip_url')
             
         def get_proxy():
-            response = requests.get(url)
+            response = requests.get(url, timeout=10)
             response.raise_for_status()
-            return response.text.split("\r\n")[0]
+            return response.text.splitlines()[0].strip()
             
         proxy = get_proxy()
         if proxy == "error000x-13":
             appKey = ""
             anquanma = ""
             whitelist_url = f"https://sch.shanchendaili.com/api.html?action=addWhiteList&appKey={appKey}&anquanma={anquanma}"
-            requests.get(whitelist_url).raise_for_status()
+            requests.get(whitelist_url, timeout=10).raise_for_status()
             time.sleep(1)
             proxy = get_proxy()
         
         if username and password:
-            return f"socks5://{username}:{password}@{proxy}"
-        return f"socks5://{proxy}"
+            return f"http://{username}:{password}@{proxy}"
+        return f"http://{proxy}"
         
     except requests.RequestException as e:
         handle_error('request', e)

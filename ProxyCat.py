@@ -26,12 +26,14 @@ def update_status(server):
     def reload_server_config(new_config):
         old_use_getip = server.use_getip
         old_mode = server.mode
+        old_proxy_file = server.proxy_file
         old_port = int(server.config.get('port', '1080'))
         
         server.config.update(new_config)
         server._update_config_values(new_config)
         
-        if old_use_getip != server.use_getip or old_mode != server.mode:
+        if (old_use_getip != server.use_getip or old_mode != server.mode or
+                old_proxy_file != server.proxy_file):
             server._handle_mode_change()
         
         if old_port != server.port:
@@ -52,6 +54,8 @@ def update_status(server):
                     logging.info(get_message('config_file_changed', server.language))
                     new_config = load_config(config_file)
                     reload_server_config(new_config)
+                    ip_file = server.proxy_file
+                    last_ip_modified_time = os.path.getmtime(ip_file) if os.path.exists(ip_file) else 0
                     last_config_modified_time = current_config_modified_time
                     continue
             
@@ -129,6 +133,7 @@ def update_status(server):
                 logging.error(f"Status update error: {e}")
             elif display_level >= 1:
                 logging.error(get_message('status_update_error', server.language))
+        display_level = int(server.config.get('display_level', '1'))
         time.sleep(1)
 
 async def handle_client_wrapper(server, reader, writer, clients):

@@ -5,7 +5,6 @@ import logging
 from datetime import datetime
 import json
 from configparser import ConfigParser
-from itertools import cycle
 import werkzeug.serving
 from functools import wraps
 
@@ -149,6 +148,7 @@ def save_config():
         port_changed = str(new_config.get('port', '')) != str(current_config.get('port', ''))
         mode_changed = new_config.get('mode', '') != current_config.get('mode', '')
         use_getip_changed = (new_config.get('use_getip', 'False').lower() == 'true') != (current_config.get('use_getip', 'False').lower() == 'true')
+        proxy_file_changed = new_config.get('proxy_file', current_config.get('proxy_file', 'ip.txt')) != current_config.get('proxy_file', 'ip.txt')
         
         config_parser = ConfigParser()
         config_parser.read('config/config.ini', encoding='utf-8')
@@ -172,7 +172,7 @@ def save_config():
         server._init_config_values(server.config)
         
         
-        if mode_changed or use_getip_changed:
+        if mode_changed or use_getip_changed or proxy_file_changed:
             server._handle_mode_change()
             
             
@@ -201,10 +201,11 @@ def handle_proxies():
             proxy_file = get_config_path(os.path.basename(server.proxy_file))
             with open(proxy_file, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(proxies))
-            server.proxies = server._load_file_proxies()
-            if server.proxies:
-                server.proxy_cycle = cycle(server.proxies)
-                server.current_proxy = next(server.proxy_cycle)
+            if not server._reload_proxies():
+                return jsonify({
+                    'status': 'error',
+                    'message': get_message('proxy_save_failed', server.language, 'No valid proxy entries')
+                }), 400
             return jsonify({
                 'status': 'success',
                 'message': get_message('proxy_save_success', server.language)
