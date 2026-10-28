@@ -651,7 +651,9 @@ if __name__ == '__main__':
         # Bind the management port before starting the proxy thread.  This is
         # the authoritative availability check and avoids leaving a partially
         # started application when another process already owns web_port.
-        web_server = werkzeug.serving.make_server('0.0.0.0', web_port, app)
+        web_server = werkzeug.serving.make_server(
+            '0.0.0.0', web_port, app, threaded=True
+        )
     except OSError as error:
         logging.error(f"Web server port {web_port} is unavailable: {error}")
         raise SystemExit(1)
