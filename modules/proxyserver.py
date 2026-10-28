@@ -242,14 +242,19 @@ class AsyncProxyServer:
 
         if self.server_instance:
             self.server_instance.close()
-            await self.server_instance.wait_closed()
-            self.server_instance = None
 
+        # Client handlers must be cancelled before wait_closed().  On newer
+        # Python versions wait_closed() can wait for active connections, which
+        # would otherwise make restart depend on clients disconnecting first.
         for task in list(self.tasks):
             task.cancel()
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
         self.tasks.clear()
+
+        if self.server_instance:
+            await self.server_instance.wait_closed()
+            self.server_instance = None
 
         self.running = False
         logging.info(get_message('server_shutting_down', self.language))
