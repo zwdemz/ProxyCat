@@ -2001,7 +2001,10 @@
                     showToast(response.message);
                 },
                 error: function(xhr) {
-                    showToast(translations[currentLanguage].operation_failed.replace('{}', xhr.responseText));
+                    const message = xhr.responseJSON && xhr.responseJSON.message
+                        ? xhr.responseJSON.message
+                        : xhr.responseText;
+                    showToast(translations[currentLanguage].operation_failed.replace('{}', message));
                 },
                 complete: function() {
                     if (btn) {
@@ -2090,7 +2093,10 @@
                                     updateStatus();
                                 },
                                 error: function(xhr) {
-                                    showNotification(translations[currentLanguage].service_restart_failed.format(xhr.responseText), 'error');
+                                    const message = xhr.responseJSON && xhr.responseJSON.message
+                                        ? xhr.responseJSON.message
+                                        : xhr.responseText;
+                                    showNotification(translations[currentLanguage].service_restart_failed + ': ' + message, 'error');
                                 }
                             });
                         }

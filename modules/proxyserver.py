@@ -72,6 +72,9 @@ class AsyncProxyServer:
         self.running = False
         self.stop_server = False
         self.server_instance = None
+        self.event_loop = None
+        self.last_start_error = None
+        self._stop_lock = None
         self.tasks = set()
         self.last_switch_time = time.time()
         self.proxy_cycle = None
@@ -163,72 +166,107 @@ class AsyncProxyServer:
             return []
 
     async def start(self):
-        if not self.running:
-            self.stop_server = False
-            self.running = True
-            
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if self.running:
+            return
+
+        self.stop_server = False
+        self.last_start_error = None
+        sock = None
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if os.name == 'nt' and hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+                # Windows SO_REUSEADDR can allow another process to bind the
+                # same address.  Require exclusive ownership for a listener.
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                
-                sock.bind(('0.0.0.0', self.port))
-                
-                loop = asyncio.get_event_loop()
-                if hasattr(loop, 'set_default_executor'):
-                    import concurrent.futures
-                    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(32, os.cpu_count() * 4))
-                    loop.set_default_executor(executor)
-                
-                server = await asyncio.start_server(
-                    self.handle_client,
-                    sock=sock,
-                    backlog=2048,      
-                    limit=32768,       
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+            # Binding is the authoritative port-availability check.  Do not mark
+            # the service as running until both bind() and start_server() succeed.
+            sock.bind(('0.0.0.0', self.port))
+
+            loop = asyncio.get_running_loop()
+            if hasattr(loop, 'set_default_executor'):
+                import concurrent.futures
+                executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max(32, (os.cpu_count() or 1) * 4)
                 )
-                
-                self.server_instance = server
-                logging.info(get_message('server_running', self.language, '0.0.0.0', self.port))
-                
-                self.tasks.add(asyncio.create_task(self.cleanup_clients()))
-                self.tasks.add(asyncio.create_task(self._cleanup_pool()))
-                self.tasks.add(asyncio.create_task(self.cleanup_disconnected_ips()))
-                
-                if hasattr(os, 'sched_setaffinity'):
-                    try:
-                        os.sched_setaffinity(0, range(os.cpu_count()))
-                    except:
-                        pass
-                
-                async with server:
-                    await server.serve_forever()
-                    
-            except Exception as e:
-                if not self.stop_server:
-                    logging.error(get_message('server_start_error', self.language, str(e)))
-            finally:
-                self.running = False
-                self.server_instance = None
+                loop.set_default_executor(executor)
+
+            server = await asyncio.start_server(
+                self.handle_client,
+                sock=sock,
+                backlog=2048,
+                limit=32768,
+            )
+            sock = None  # asyncio.Server now owns the socket.
+
+            self.event_loop = loop
+            self._stop_lock = asyncio.Lock()
+            self.server_instance = server
+            self.running = True
+            logging.info(get_message('server_running', self.language, '0.0.0.0', self.port))
+
+            self.tasks.add(asyncio.create_task(self.cleanup_clients()))
+            self.tasks.add(asyncio.create_task(self._cleanup_pool()))
+            self.tasks.add(asyncio.create_task(self.cleanup_disconnected_ips()))
+
+            if hasattr(os, 'sched_setaffinity'):
+                try:
+                    os.sched_setaffinity(0, range(os.cpu_count() or 1))
+                except Exception:
+                    pass
+
+            async with server:
+                await server.serve_forever()
+
+        except asyncio.CancelledError:
+            # Expected when stop() closes the listening server.
+            pass
+        except Exception as e:
+            self.last_start_error = str(e)
+            if not self.stop_server:
+                logging.error(get_message('server_start_error', self.language, str(e)))
+        finally:
+            if sock is not None:
+                sock.close()
+            self.running = False
+            self.server_instance = None
+            self.event_loop = None
 
     async def stop(self):
-        if self.running:
-            self.stop_server = True
-            if self.server_instance:
-                self.server_instance.close()
-                await self.server_instance.wait_closed()
-                self.server_instance = None
-            
-            for task in self.tasks:
-                task.cancel()
-            if self.tasks:
-                await asyncio.gather(*self.tasks, return_exceptions=True)
-            self.tasks.clear()
-            
-            self.running = False
-            logging.info(get_message('server_shutting_down', self.language))
+        if self._stop_lock is None:
+            self._stop_lock = asyncio.Lock()
+
+        async with self._stop_lock:
+            await self._stop_locked()
+
+    async def _stop_locked(self):
+        self.stop_server = True
+
+        if self.server_instance:
+            self.server_instance.close()
+
+        # Client handlers must be cancelled before wait_closed().  On newer
+        # Python versions wait_closed() can wait for active connections, which
+        # would otherwise make restart depend on clients disconnecting first.
+        for task in list(self.tasks):
+            task.cancel()
+        if self.tasks:
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+        self.tasks.clear()
+
+        if self.server_instance:
+            await self.server_instance.wait_closed()
+            self.server_instance = None
+
+        self.running = False
+        logging.info(get_message('server_shutting_down', self.language))
 
     async def get_next_proxy(self):
         try:
