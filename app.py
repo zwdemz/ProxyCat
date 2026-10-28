@@ -349,114 +349,146 @@ def switch_proxy():
             'message': get_message('switch_failed', server.language, str(e))
         })
 
+def start_proxy_service(timeout=5):
+    """Start the proxy thread and wait for the listening socket to be ready."""
+    if server.running:
+        return True, None
+
+    old_thread = getattr(server, 'proxy_thread', None)
+    if old_thread and old_thread.is_alive():
+        old_thread.join(timeout=timeout)
+        if old_thread.is_alive():
+            return False, 'Previous proxy service is still shutting down'
+
+    server.stop_server = False
+    server.last_start_error = None
+    server.proxy_thread = threading.Thread(
+        target=lambda: asyncio.run(run_server(server)),
+        daemon=True,
+        name='proxycat-server',
+    )
+    server.proxy_thread.start()
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if server.running:
+            return True, None
+        if server.last_start_error:
+            return False, server.last_start_error
+        if not server.proxy_thread.is_alive():
+            break
+        time.sleep(0.05)
+
+    return False, server.last_start_error or 'Timed out waiting for the proxy port to listen'
+
+
+def stop_proxy_service(timeout=5):
+    """Stop the proxy server on its owning event loop and wait for release."""
+    proxy_thread = getattr(server, 'proxy_thread', None)
+    loop = server.event_loop
+
+    if loop and loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(server.stop(), loop)
+        try:
+            future.result(timeout=timeout)
+        except Exception as e:
+            return False, str(e)
+
+    if proxy_thread and proxy_thread.is_alive():
+        proxy_thread.join(timeout=timeout)
+        if proxy_thread.is_alive():
+            return False, 'Timed out waiting for the proxy port to be released'
+
+    server.proxy_thread = None
+    return True, None
+
+
 @app.route('/api/service', methods=['POST'])
 @require_token
 def control_service():
     try:
         action = request.json.get('action')
+
         if action == 'start':
-            if not server.running:
-                server.stop_server = False
-                if hasattr(server, 'proxy_thread') and server.proxy_thread and server.proxy_thread.is_alive():
-                    server.proxy_thread.join(timeout=5)
-                server.proxy_thread = threading.Thread(target=lambda: asyncio.run(run_server(server)), daemon=True)
-                server.proxy_thread.start()
-                
-                for _ in range(10):
-                    if server.running:
-                        break
-                    time.sleep(0.5)
-                    
-                if server.running:
-                    return jsonify({
-                        'status': 'success',
-                        'message': get_message('service_start_success', server.language),
-                        'service_status': 'running'
-                    })
-                else:
-                    return jsonify({
-                        'status': 'error',
-                        'message': get_message('service_start_failed', server.language),
-                        'service_status': 'stopped'
-                    })
-            return jsonify({
-                'status': 'success',
-                'message': get_message('service_already_running', server.language),
-                'service_status': 'running'
-            })
-            
-        elif action == 'stop':
             if server.running:
-                server.stop_server = True
-                server.running = False
-                
-                if server.server_instance:
-                    server.server_instance.close()
-                
-                if hasattr(server, 'proxy_thread') and server.proxy_thread:
-                    server.proxy_thread = None
-                
-                for _ in range(5):
-                    if server.server_instance is None:
-                        break
-                    time.sleep(0.2)
-                
+                return jsonify({
+                    'status': 'success',
+                    'message': get_message('service_already_running', server.language),
+                    'service_status': 'running'
+                })
+
+            success, error = start_proxy_service()
+            if success:
+                return jsonify({
+                    'status': 'success',
+                    'message': get_message('service_start_success', server.language),
+                    'service_status': 'running'
+                })
+
+            return jsonify({
+                'status': 'error',
+                'message': get_message('service_start_failed', server.language, error),
+                'service_status': 'stopped'
+            }), 409
+
+        if action == 'stop':
+            if not server.running and not (
+                getattr(server, 'proxy_thread', None)
+                and server.proxy_thread.is_alive()
+            ):
+                return jsonify({
+                    'status': 'success',
+                    'message': get_message('service_not_running', server.language),
+                    'service_status': 'stopped'
+                })
+
+            success, error = stop_proxy_service()
+            if success:
                 return jsonify({
                     'status': 'success',
                     'message': get_message('service_stop_success', server.language),
                     'service_status': 'stopped'
                 })
+
             return jsonify({
-                'status': 'success',
-                'message': get_message('service_not_running', server.language),
-                'service_status': 'stopped'
-            })
-            
-        elif action == 'restart':
-            if server.running:
-                server.stop_server = True
-                if server.server_instance:
-                    server.server_instance.close()
-                
-                for _ in range(10):
-                    if not server.running:
-                        break
-                    time.sleep(0.5)
-                
-                if server.running:
-                    if hasattr(server, 'proxy_thread') and server.proxy_thread:
-                        server.proxy_thread = None
-                    server.running = False
-            
-            server.stop_server = False
-            server.proxy_thread = threading.Thread(target=lambda: asyncio.run(run_server(server)), daemon=True)
-            server.proxy_thread.start()
-            
-            for _ in range(10):
-                if server.running:
-                    break
-                time.sleep(0.5)
-            
-            if server.running:
-                return jsonify({
-                    'status': 'success',
-                    'message': get_message('service_restart_success', server.language)
-                })
-            else:
+                'status': 'error',
+                'message': get_message('service_stop_failed', server.language, error),
+                'service_status': 'running' if server.running else 'stopped'
+            }), 500
+
+        if action == 'restart':
+            success, error = stop_proxy_service()
+            if not success:
                 return jsonify({
                     'status': 'error',
-                    'message': get_message('service_restart_failed', server.language)
+                    'message': get_message('service_restart_failed', server.language, error),
+                    'service_status': 'running' if server.running else 'stopped'
+                }), 500
+
+            success, error = start_proxy_service()
+            if success:
+                return jsonify({
+                    'status': 'success',
+                    'message': get_message('service_restart_success', server.language),
+                    'service_status': 'running'
                 })
-            
+
+            return jsonify({
+                'status': 'error',
+                'message': get_message('service_restart_failed', server.language, error),
+                'service_status': 'stopped'
+            }), 409
+
         return jsonify({
             'status': 'error',
             'message': get_message('invalid_action', server.language)
-        })
+        }), 400
     except Exception as e:
         return jsonify({
             'status': 'error',
             'message': get_message('operation_failed', server.language, str(e))
-        })
+        }), 500
+
 
 @app.route('/api/language', methods=['POST'])
 def change_language():
@@ -615,7 +647,8 @@ if __name__ == '__main__':
     logging.info(get_message('web_panel_url', server.language, web_url))
     logging.info(get_message('web_panel_notice', server.language))
 
-    proxy_thread = threading.Thread(target=run_proxy_server, daemon=True)
-    proxy_thread.start()
-    
+    success, error = start_proxy_service()
+    if not success:
+        logging.error(get_message('service_start_failed', server.language, error))
+
     app.run(host='0.0.0.0', port=web_port)
