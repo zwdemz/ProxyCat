@@ -1,5 +1,6 @@
 import asyncio
 import socket
+import threading
 import unittest
 import sys
 from pathlib import Path
@@ -122,6 +123,52 @@ class ProxyPoolSelectionTests(unittest.IsolatedAsyncioTestCase):
         finally:
             writer.close()
             await writer.wait_closed()
+
+
+    async def test_threaded_shutdown_does_not_race_final_cleanup(self):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        server = self.make_server()
+        server.port = port
+        thread_errors = []
+
+        async def lifecycle():
+            try:
+                await server.start()
+            finally:
+                await server.stop()
+
+        def run_lifecycle():
+            try:
+                asyncio.run(lifecycle())
+            except Exception as error:
+                thread_errors.append(error)
+
+        proxy_thread = threading.Thread(target=run_lifecycle)
+        proxy_thread.start()
+
+        for _ in range(100):
+            if server.running:
+                break
+            await asyncio.sleep(0.01)
+        self.assertTrue(server.running)
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                server.stop(), server.event_loop
+            )
+            await asyncio.wait_for(asyncio.wrap_future(future), timeout=1)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+        proxy_thread.join(timeout=1)
+        self.assertFalse(proxy_thread.is_alive())
+        self.assertEqual([], thread_errors)
 
 
 if __name__ == "__main__":
