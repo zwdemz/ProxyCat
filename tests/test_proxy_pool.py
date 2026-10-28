@@ -1,3 +1,5 @@
+import asyncio
+import socket
 import unittest
 import sys
 from pathlib import Path
@@ -48,6 +50,46 @@ class ProxyPoolSelectionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("modules.proxyserver.getip.newip", side_effect=ValueError("provider unavailable")):
             self.assertIsNone(await server._load_getip_proxy())
+
+
+    async def test_occupied_port_does_not_report_service_running(self):
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.bind(("0.0.0.0", 0))
+        blocker.listen()
+        server = self.make_server()
+        server.port = blocker.getsockname()[1]
+
+        try:
+            await server.start()
+            self.assertFalse(server.running)
+            self.assertTrue(server.last_start_error)
+        finally:
+            blocker.close()
+
+    async def test_stop_releases_port_before_restart(self):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        server = self.make_server()
+        server.port = port
+        start_task = asyncio.create_task(server.start())
+
+        for _ in range(100):
+            if server.running:
+                break
+            await asyncio.sleep(0.01)
+        self.assertTrue(server.running)
+
+        await server.stop()
+        await start_task
+
+        rebound = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            rebound.bind(("0.0.0.0", port))
+        finally:
+            rebound.close()
 
 
 if __name__ == "__main__":
