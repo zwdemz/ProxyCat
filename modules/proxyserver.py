@@ -74,6 +74,7 @@ class AsyncProxyServer:
         self.server_instance = None
         self.event_loop = None
         self.last_start_error = None
+        self._stop_lock = None
         self.tasks = set()
         self.last_switch_time = time.time()
         self.proxy_cycle = None
@@ -206,6 +207,7 @@ class AsyncProxyServer:
             sock = None  # asyncio.Server now owns the socket.
 
             self.event_loop = loop
+            self._stop_lock = asyncio.Lock()
             self.server_instance = server
             self.running = True
             logging.info(get_message('server_running', self.language, '0.0.0.0', self.port))
@@ -238,6 +240,13 @@ class AsyncProxyServer:
             self.event_loop = None
 
     async def stop(self):
+        if self._stop_lock is None:
+            self._stop_lock = asyncio.Lock()
+
+        async with self._stop_lock:
+            await self._stop_locked()
+
+    async def _stop_locked(self):
         self.stop_server = True
 
         if self.server_instance:
