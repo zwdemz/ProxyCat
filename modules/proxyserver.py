@@ -174,7 +174,12 @@ class AsyncProxyServer:
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if os.name == 'nt' and hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+                # Windows SO_REUSEADDR can allow another process to bind the
+                # same address.  Require exclusive ownership for a listener.
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
