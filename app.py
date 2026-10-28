@@ -647,8 +647,20 @@ if __name__ == '__main__':
     logging.info(get_message('web_panel_url', server.language, web_url))
     logging.info(get_message('web_panel_notice', server.language))
 
+    try:
+        # Bind the management port before starting the proxy thread.  This is
+        # the authoritative availability check and avoids leaving a partially
+        # started application when another process already owns web_port.
+        web_server = werkzeug.serving.make_server('0.0.0.0', web_port, app)
+    except OSError as error:
+        logging.error(f"Web server port {web_port} is unavailable: {error}")
+        raise SystemExit(1)
+
     success, error = start_proxy_service()
     if not success:
         logging.error(get_message('service_start_failed', server.language, error))
 
-    app.run(host='0.0.0.0', port=web_port)
+    try:
+        web_server.serve_forever()
+    finally:
+        stop_proxy_service()
