@@ -92,5 +92,37 @@ class ProxyPoolSelectionTests(unittest.IsolatedAsyncioTestCase):
             rebound.close()
 
 
+    async def test_stop_does_not_wait_for_idle_clients(self):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        server = self.make_server()
+        server.port = port
+        start_task = asyncio.create_task(server.start())
+
+        for _ in range(100):
+            if server.running:
+                break
+            await asyncio.sleep(0.01)
+        self.assertTrue(server.running)
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            for _ in range(100):
+                if server.active_connections:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(server.active_connections)
+
+            await asyncio.wait_for(server.stop(), timeout=1)
+            await asyncio.wait_for(start_task, timeout=1)
+            self.assertFalse(server.running)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+
 if __name__ == "__main__":
     unittest.main()
