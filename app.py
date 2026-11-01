@@ -14,7 +14,7 @@ from functools import wraps
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ProxyCat import run_server
-from modules.modules import load_config, check_proxies, get_message, load_ip_list
+from modules.modules import CURRENT_VERSION, load_config, check_proxies, get_message, load_ip_list
 from modules.proxyserver import AsyncProxyServer
 import asyncio
 import threading
@@ -591,8 +591,6 @@ def check_version():
         httpx_logger = logging.getLogger('httpx')
         original_level = httpx_logger.level
         httpx_logger.setLevel(logging.WARNING)
-        
-        CURRENT_VERSION = "ProxyCat-V2.0.4"
         
         try:
             client = httpx.Client(transport=httpx.HTTPTransport(retries=3))
