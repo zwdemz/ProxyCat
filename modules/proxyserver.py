@@ -1082,6 +1082,12 @@ class AsyncProxyServer:
         if event is not None:
             event.set()
         if sock is not None:
+            # Linux keeps a blocking accept alive after close from another thread.
+            # Shutdown wakes the acceptor before close so the listening port is released.
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 sock.close()
             except OSError:
