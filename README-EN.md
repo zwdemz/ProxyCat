@@ -11,6 +11,7 @@
 - [Development Background](#development-background)
 - [Features](#features)
 - [Installation and Usage](#installation-and-usage)
+- [Secure Authentication Setup](#secure-authentication-setup)
 - [Disclaimer](#disclaimer)
 - [Changelog](#changelog)
 - [Development Plan](#development-plan)
@@ -48,6 +49,27 @@ Therefore, **ProxyCat** was born! This tool aims to transform short-term IPs (la
 ## Tool Usage
 
 [ProxyCat Operation Manual](../main/ProxyCat-Manual/Operation%20Manual.md)
+
+## Secure Authentication Setup
+
+Management APIs and the public proxy listener require authentication by default. The repository no longer ships public default passwords. Configure a management token and at least one proxy user before deployment.
+
+For source deployments, inject credentials through environment variables so they are not written to the repository:
+
+```powershell
+$env:PROXYCAT_MANAGEMENT_TOKEN = '<long-random-token>'
+$env:PROXYCAT_PROXY_USERNAME = '<proxy-username>'
+$env:PROXYCAT_PROXY_PASSWORD = '<strong-proxy-password>'
+python app.py
+```
+
+Linux and macOS use the same environment variable names. For Docker, copy `.env.example` to `.env`, replace all three placeholders, and run:
+
+```bash
+docker compose up -d --build
+```
+
+Management APIs accept `Authorization: Bearer <token>` or `X-ProxyCat-Token: <token>`. The initial browser visit may use `/web?token=<token>`; the service sets an `HttpOnly`, `SameSite=Strict` session cookie, and the page removes the token from the address bar before sending later requests in a header. Production deployments must use HTTPS and set `management_cookie_secure=true`. HTTP proxy clients use `Proxy-Authorization: Basic`, while SOCKS5 clients use username/password authentication. Proxy passwords saved through the web panel are persisted as `scrypt` hashes and are never returned by the API; legacy plaintext values migrate on the next save. When `require_proxy_auth=true` and no valid user is configured, the proxy listener refuses to start.
 
 ## Error Troubleshooting
 

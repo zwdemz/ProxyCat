@@ -11,6 +11,7 @@
 - [开发缘由](#开发缘由)
 - [功能特点](#功能特点)
 - [安装与使用](#安装与使用)
+- [安全认证配置](#安全认证配置)
 - [免责申明](#免责申明)
 - [更新日志](#更新日志)
 - [开发计划](#开发计划)
@@ -48,6 +49,27 @@
 ## 工具使用
 
 [ProxyCat操作手册](../main/ProxyCat-Manual/Operation%20Manual.md)
+
+## 安全认证配置
+
+管理接口和对外代理监听默认均要求认证。仓库不再提供公共默认密码，部署前必须配置管理令牌和至少一个代理用户。
+
+源码运行可以使用环境变量，不会把凭据写入仓库：
+
+```powershell
+$env:PROXYCAT_MANAGEMENT_TOKEN = '<随机长令牌>'
+$env:PROXYCAT_PROXY_USERNAME = '<代理用户名>'
+$env:PROXYCAT_PROXY_PASSWORD = '<代理强密码>'
+python app.py
+```
+
+Linux/macOS 使用同名环境变量。Docker 部署先复制 `.env.example` 为 `.env`，替换三个占位值后执行：
+
+```bash
+docker compose up -d --build
+```
+
+管理 API 支持 `Authorization: Bearer <token>` 或 `X-ProxyCat-Token: <token>`。首次打开管理页面仍可使用 `/web?token=<token>`；服务会设置 `HttpOnly`、`SameSite=Strict` 会话 Cookie，页面加载后从地址栏移除令牌，后续请求改用请求头。生产环境必须启用 HTTPS，并将 `management_cookie_secure=true`。HTTP 代理使用 `Proxy-Authorization: Basic`，SOCKS5 使用用户名/密码认证。通过 Web 保存的代理密码使用 `scrypt` 哈希持久化，接口不会回传密码；旧版明文密码会在下一次保存时迁移。`require_proxy_auth=true` 且没有有效用户时，代理端口会拒绝启动。
 
 ## 报错排查
 

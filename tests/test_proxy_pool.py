@@ -18,6 +18,7 @@ class ProxyPoolSelectionTests(unittest.IsolatedAsyncioTestCase):
             "interval": "300",
             "use_getip": "False",
             "check_proxies": "False",
+            "require_proxy_auth": "False",
             "proxy_file": "missing-test-file.txt",
         })
         server.proxies = ["http://127.0.0.1:18080", "http://127.0.0.1:18081"]

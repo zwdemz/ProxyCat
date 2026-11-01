@@ -1595,18 +1595,40 @@
     <script>
         let lastLogId = 0;
         let searchTimeout = null;
+        const unchangedProxyPassword = '__PROXYCAT_PASSWORD_UNCHANGED__';
         const searchInput = document.getElementById('log-search-input');
         const clearSearchBtn = document.getElementById('clear-search');
 
+        const tokenParameter = new URLSearchParams(window.location.search).get('token');
+        if (tokenParameter) {
+            sessionStorage.setItem('proxycat_management_token', tokenParameter);
+            const sanitizedUrl = new URL(window.location.href);
+            sanitizedUrl.searchParams.delete('token');
+            window.history.replaceState({}, document.title, sanitizedUrl.toString());
+        }
+
         function getToken() {
-            const urlParams = new URLSearchParams(window.location.search);
-            return urlParams.get('token') || '';
+            return sessionStorage.getItem('proxycat_management_token') || '';
         }
 
         function appendToken(url) {
+            return url;
+        }
+
+        $(document).ajaxSend(function(_event, request) {
             const token = getToken();
-            const separator = url.includes('?') ? '&' : '?';
-            return token ? `${url}${separator}token=${token}` : url;
+            if (token) {
+                request.setRequestHeader('X-ProxyCat-Token', token);
+            }
+        });
+
+        function authenticatedFetch(url, options = {}) {
+            const headers = new Headers(options.headers || {});
+            const token = getToken();
+            if (token) {
+                headers.set('X-ProxyCat-Token', token);
+            }
+            return fetch(url, { ...options, headers });
         }
 
         function updateAddresses(config) {
@@ -2651,7 +2673,7 @@
         // 修改初始化语言函数
         async function initializeLanguage() {
             try {
-                const response = await fetch(appendToken('/api/status'));
+                const response = await authenticatedFetch(appendToken('/api/status'));
                 const data = await response.json();
                 currentLanguage = data.config.language || 'cn';
                 
@@ -2688,7 +2710,7 @@
             const newLanguage = currentLanguage === 'cn' ? 'en' : 'cn';
             
             try {
-                const response = await fetch(appendToken('/api/language'), {
+                const response = await authenticatedFetch(appendToken('/api/language'), {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -2704,7 +2726,7 @@
                     updatePageLanguage(newLanguage);
                     
                     // 特别更新服务状态文本
-                    const statusResponse = await fetch(appendToken('/api/status'));
+                    const statusResponse = await authenticatedFetch(appendToken('/api/status'));
                     const statusData = await statusResponse.json();
                     const status = statusData.service_status || 'running';
                     const statusText = document.querySelector('.status-text');
@@ -2762,7 +2784,7 @@
                 const now = Date.now();
                 
                 if (!lastCheck || (now - parseInt(lastCheck)) > 24 * 60 * 60 * 1000) {
-                    const response = await fetch(appendToken('/api/version'));
+                    const response = await authenticatedFetch(appendToken('/api/version'));
                     const data = await response.json();
                     
                     if (data.status === 'success' && !data.is_latest) {
@@ -2791,7 +2813,7 @@
 
         async function switchLanguage(newLanguage) {
             try {
-                const response = await fetch(appendToken('/api/language'), {
+                const response = await authenticatedFetch(appendToken('/api/language'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ language: newLanguage })
@@ -2813,11 +2835,11 @@
                 const tbody = $('#user-table tbody');
                 tbody.empty();
                 
-                Object.entries(data.users).forEach(([username, password]) => {
+                data.users.forEach((username) => {
                     tbody.append(`
                         <tr>
                             <td>${username}</td>
-                            <td>${password}</td>
+                            <td>••••••••</td>
                             <td>
                                 <button class="btn btn-sm btn-warning" onclick="editUserPassword('${username}')">
                                     <i class="fa fa-edit"></i>
@@ -2845,7 +2867,7 @@
             const users = {};
             $('#user-table tbody tr').each(function() {
                 const tds = $(this).find('td');
-                users[$(tds[0]).text()] = $(tds[1]).text();
+                users[$(tds[0]).text()] = unchangedProxyPassword;
             });
             
             users[username] = password;
@@ -2861,7 +2883,7 @@
                 const tds = $(this).find('td');
                 const user = $(tds[0]).text();
                 if (user !== username) {
-                    users[user] = $(tds[1]).text();
+                    users[user] = unchangedProxyPassword;
                 }
             });
             
@@ -2896,7 +2918,7 @@
             $('#user-table tbody tr').each(function() {
                 const tds = $(this).find('td');
                 const user = $(tds[0]).text();
-                users[user] = user === username ? newPassword : $(tds[1]).text();
+                users[user] = user === username ? newPassword : unchangedProxyPassword;
             });
             
             saveUsers(users);

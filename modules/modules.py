@@ -165,6 +165,11 @@ MESSAGES = {
         'service_stop_failed': '服务停止失败：{}',
         'service_restart_failed': '服务重启失败：{}',
         'invalid_token': '无效的访问令牌',
+        'management_auth_not_configured': '管理令牌未配置，请设置 PROXYCAT_MANAGEMENT_TOKEN 或 Server.token',
+        'proxy_auth_users_required': '代理对外认证已启用，至少需要配置一个代理用户',
+        'proxy_auth_environment_incomplete': 'PROXYCAT_PROXY_USERNAME 和 PROXYCAT_PROXY_PASSWORD 必须同时设置',
+        'invalid_proxy_user': '代理用户名或密码格式无效',
+        'proxy_users_managed_by_environment': '代理用户由环境变量管理，不能通过 Web 页面修改',
         'config_file_changed': '检测到配置文件更改，正在重新加载...',
         'proxy_file_changed': '代理文件已更改，正在重新加载...',
         'test_target_label': '测试目标地址',
@@ -343,6 +348,11 @@ MESSAGES = {
         'service_stop_failed': 'Failed to stop service: {}',
         'service_restart_failed': 'Failed to restart service: {}',
         'invalid_token': 'Invalid access token',
+        'management_auth_not_configured': 'Management token is not configured; set PROXYCAT_MANAGEMENT_TOKEN or Server.token',
+        'proxy_auth_users_required': 'External proxy authentication is enabled and requires at least one proxy user',
+        'proxy_auth_environment_incomplete': 'PROXYCAT_PROXY_USERNAME and PROXYCAT_PROXY_PASSWORD must be configured together',
+        'invalid_proxy_user': 'The proxy username or password format is invalid',
+        'proxy_users_managed_by_environment': 'Proxy users are managed by environment variables and cannot be changed in the web panel',
         'config_file_changed': 'Config file change detected, reloading...',
         'proxy_file_changed': 'Proxy file changed, reloading...',
         'test_target_label': 'Test Target Address',
@@ -467,13 +477,17 @@ def logos():
 
 DEFAULT_CONFIG = {
     'port': '1080',
+    'web_port': '5000',
     'mode': 'cycle',
     'interval': '300',
-    'username': 'neko',
-    'password': '123456',
+    'username': '',
+    'password': '',
     'use_getip': 'False',
     'proxy_file': 'ip.txt',
     'check_proxies': 'True',
+    'require_proxy_auth': 'True',
+    'management_cookie_secure': 'False',
+    'token': '',
     'whitelist_file': '',
     'blacklist_file': '',
     'ip_auth_priority': 'whitelist',
@@ -496,6 +510,10 @@ def load_config(config_file='config/config.ini'):
         
         if config.has_section('Users'):
             result['Users'] = dict(config.items('Users'))
+
+        environment_token = os.environ.get('PROXYCAT_MANAGEMENT_TOKEN', '').strip()
+        if environment_token:
+            result['token'] = environment_token
         
         return result
     except Exception as e:
@@ -543,7 +561,7 @@ async def check_http_proxy(proxy, test_url=None):
         proxies['https://'] = f'{protocol}://{host}:{port}'
         
     try:
-        async with httpx.AsyncClient(proxies=proxies, timeout=10, verify=False) as client:
+        async with httpx.AsyncClient(proxies=proxies, timeout=10) as client:
             try:
                 response = await client.get(test_url)
                 return response.status_code == 200
