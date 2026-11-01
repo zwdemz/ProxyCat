@@ -35,6 +35,7 @@ from functools import wraps
 import signal
 import atexit
 import hmac
+from urllib.parse import urlencode
 from modules.auth import PASSWORD_HASH_PREFIX, UNCHANGED_PASSWORD, hash_proxy_password
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -116,7 +117,36 @@ service_lifecycle_lock = threading.RLock()
 
 _ad_dismissed = False
 
+def refresh_management_token():
+    """Rotate an expired generated token while keeping explicit credentials fixed.
+
+    Reads the private credential sidecar only when renewal is due. The new token
+    and expiry are installed together under the configuration lock. Persistence
+    failures return False so callers can reject authentication rather than keep
+    accepting an expired token; errors never include token values.
+    """
+    with _config_lock:
+        current = server.config
+        expires_at = current.get('_management_token_expires_at')
+        if not current.get('_management_token_generated') or not expires_at or time.time() < expires_at:
+            return True
+        try:
+            refreshed = load_config(CONFIG_INI_PATH)
+            if not refreshed.get('token'):
+                return False
+            updated = dict(current)
+            for key in ('token', '_management_token_generated', '_management_token_expires_at'):
+                updated[key] = refreshed.get(key)
+            server.config = updated
+            return True
+        except Exception:
+            logging.error('Management token renewal failed')
+            return False
+
+
 def verify_token():
+    if not refresh_management_token():
+        return jsonify(status='error', message='Management token renewal unavailable'), 503
     config_token = server.config.get('token', '')
     if not config_token:
         return jsonify(status='error', message='Management token is not configured'), 503
@@ -139,6 +169,29 @@ def get_management_token():
         return credential.strip()
     return (request.headers.get('X-ProxyCat-Token') or request.args.get('token')
             or request.cookies.get('proxycat_management_token', ''))
+
+
+@app.route('/api/management-access')
+def get_management_access():
+    """Return the current access path and expiry only to authenticated operators.
+
+    The path is relative so the browser uses its own trusted origin, including
+    reverse-proxy HTTPS and port settings. Explicit tokens have no auto expiry.
+    """
+    return jsonify(
+        access_path='/web?' + urlencode({'token': server.config.get('token', '')}),
+        automatically_generated=bool(server.config.get('_management_token_generated')),
+        expires_at=server.config.get('_management_token_expires_at'),
+    )
+
+
+@app.after_request
+def prevent_management_access_caching(response):
+    """Prevent browsers and proxies from caching or referring credential-bearing pages."""
+    if request.path in ('/web', '/api/management-access'):
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Referrer-Policy'] = 'no-referrer'
+    return response
 
 
 @app.before_request
@@ -195,8 +248,6 @@ def asset_version():
 def web():
     response = make_response(render_template(
         'index.html', app_version=CURRENT_VERSION, asset_version=asset_version()))
-    response.headers['Cache-Control'] = 'no-store'
-    response.headers['Referrer-Policy'] = 'no-referrer'
     if request.args.get('token'):
         response.set_cookie(
             'proxycat_management_token', get_management_token(), httponly=True,
@@ -358,10 +409,7 @@ def _persist_config(normalized_server, normalized_pool):
         if normalized_pool:
             pool_config_ini.sync_pool_section_text(CONFIG_INI_PATH, normalized_pool)
 
-        sections = pool_config_ini.read_ini_sections(CONFIG_INI_PATH)
-        updated_config = dict(sections.get('Server', {}))
-        if 'Users' in sections:
-            updated_config['Users'] = dict(sections['Users'])
+        updated_config = load_config(CONFIG_INI_PATH)
 
     _note_config_written()
     reload_config_sections()
@@ -424,6 +472,7 @@ def watch_server_config(interval: float = 1.0) -> None:
     list_snapshot = list_files_snapshot(server)
     while True:
         time.sleep(interval)
+        refresh_management_token()
         _hot_reload_once()
         try:
             list_snapshot = reload_ip_lists_if_changed(server, list_snapshot)
