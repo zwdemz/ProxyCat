@@ -8,7 +8,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from modules.auth import hash_proxy_password
+from modules.auth import DEFAULT_PROXY_PASSWORD, hash_proxy_password
 
 INITIAL_CREDENTIALS_FILENAME = 'initial_credentials.txt'
 TOKEN_ROTATION_SECONDS = 15 * 24 * 60 * 60
@@ -105,7 +105,7 @@ def initialize_credentials(config, config_file):
         if need_user:
             if not saved.get('Proxy password'):
                 saved['Proxy username'] = 'proxycat'
-                saved['Proxy password'] = secrets.token_urlsafe(24)
+                saved['Proxy password'] = DEFAULT_PROXY_PASSWORD
                 changed = True
             if not saved.get('Proxy password hash'):
                 saved['Proxy password hash'] = hash_proxy_password(saved['Proxy password'])

@@ -102,6 +102,17 @@ class ManagementAuthorizationTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual(stored_hash, web_app.server.users['alice'])
 
+    def test_default_password_flag_matches_the_actual_password(self):
+        web_app.server.users = {
+            'default-user': hash_proxy_password('123456'),
+            'custom-user': hash_proxy_password('custom-secret'),
+        }
+        response = self.client.get('/api/users', headers={
+            'X-ProxyCat-Token': 'management-secret'})
+        self.assertEqual(['default-user'], response.json['default_password_users'])
+        self.assertNotIn('123456', response.get_data(as_text=True))
+        self.assertNotIn('custom-secret', response.get_data(as_text=True))
+
     def test_user_api_hashes_password_and_never_returns_it(self):
         original_directory = os.getcwd()
         web_app.server.users = {}

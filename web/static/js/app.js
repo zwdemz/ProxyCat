@@ -642,6 +642,8 @@ $(document).on('click', '#copy-management-access', function () {
     function () { toast(T().copy_failed_manual, 'error'); });
 });
 
+var defaultPasswordUsers = Object.create(null);
+
 function collectUsers() {
   var users = {};
   $('#user-table tbody tr').each(function () {
@@ -657,7 +659,9 @@ function pickAuth() {
   var names = Object.keys(users).filter(function (n) { return n; });
   var name = names.length ? names[0] : '';
   if (!name || !users[name]) return '';
-  var password = users[name] === '__PROXYCAT_PASSWORD_UNCHANGED__' ? '<password>' : encodeURIComponent(users[name]);
+  var password = users[name] === '__PROXYCAT_PASSWORD_UNCHANGED__'
+    ? (defaultPasswordUsers[name] ? '123456' : '<password>')
+    : encodeURIComponent(users[name]);
   return encodeURIComponent(name) + ':' + password + '@';
 }
 
@@ -1372,6 +1376,8 @@ function loadUsers() {
     clearTableAlert('#user-table tbody');
     var t = $('#user-table tbody').empty();
     var users = d.users || {}, count = Object.keys(users).length;
+    defaultPasswordUsers = Object.create(null);
+    (d.default_password_users || []).forEach(function (username) { defaultPasswordUsers[username] = true; });
     if (count === 0) t.append(emptyRow(3, T().no_users));
     $.each(users, function (u, p) {
       var $row = $('<tr>');
