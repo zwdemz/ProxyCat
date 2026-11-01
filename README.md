@@ -52,7 +52,9 @@
 
 ## 安全认证配置
 
-管理接口和对外代理监听默认均要求认证。仓库不再提供公共默认密码，部署前必须配置管理令牌和至少一个代理用户。
+管理接口和对外代理监听默认均要求认证。仓库不提供公共默认密码，可以在部署前手动配置管理令牌和代理用户，也可由程序在首次启动时安全生成。
+
+使用 `app_start.bat`、`ProxyCat_start.bat` 或对应的 Python 入口时，如果配置中没有管理令牌和代理用户，首次启动会自动生成高强度随机凭据。代理密码仅以 `scrypt` 哈希写入 `config.ini`，可用的初始明文凭据写入 Git 忽略的 `config/initial_credentials.txt`。请保存凭据后删除该文件。
 
 源码运行可以使用环境变量，不会把凭据写入仓库：
 
@@ -69,7 +71,9 @@ Linux/macOS 使用同名环境变量。Docker 部署先复制 `.env.example` 为
 docker compose up -d --build
 ```
 
-管理 API 支持 `Authorization: Bearer <token>` 或 `X-ProxyCat-Token: <token>`。首次打开管理页面仍可使用 `/web?token=<token>`；服务会设置 `HttpOnly`、`SameSite=Strict` 会话 Cookie，页面加载后从地址栏移除令牌，后续请求改用请求头。生产环境必须启用 HTTPS，并将 `management_cookie_secure=true`。HTTP 代理使用 `Proxy-Authorization: Basic`，SOCKS5 使用用户名/密码认证。通过 Web 保存的代理密码使用 `scrypt` 哈希持久化，接口不会回传密码；旧版明文密码会在下一次保存时迁移。`require_proxy_auth=true` 且没有有效用户时，代理端口会拒绝启动。
+管理 API 支持 `Authorization: Bearer <token>` 或 `X-ProxyCat-Token: <token>`。首次打开管理页面仍可使用 `/web?token=<token>`；服务会设置 `HttpOnly`、`SameSite=Strict` 会话 Cookie，页面加载后从地址栏移除令牌，后续请求改用请求头。生产环境必须启用 HTTPS，并将 `management_cookie_secure=true`。HTTP 代理使用 `Proxy-Authorization: Basic`，SOCKS5 使用用户名/密码认证。通过 Web 保存的代理密码使用 `scrypt` 哈希持久化，接口不会回传密码；旧版明文密码会在下一次保存时迁移。完整的环境变量凭据会优先使用；如果仅配置了用户名或密码，代理端口会拒绝启动，避免带着不完整认证配置运行。
+
+Windows 只需选择一个入口：`app_start.bat` 启动 Web 控制面板和代理服务，`ProxyCat_start.bat` 仅启动终端模式。两个入口使用同一代理端口，禁止同时运行。脚本会切换到 UTF-8 代码页，避免中文提示乱码。
 
 ## 报错排查
 

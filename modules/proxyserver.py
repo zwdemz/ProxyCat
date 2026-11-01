@@ -1,5 +1,5 @@
-import asyncio, httpx, logging, re, socket, struct, time, base64, random, os, hmac
-from werkzeug.security import check_password_hash
+import asyncio, httpx, logging, re, socket, struct, time, base64, random, os
+from modules.auth import verify_proxy_password
 from modules.modules import get_message, load_ip_list
 from asyncio import TimeoutError
 from itertools import cycle
@@ -44,7 +44,11 @@ class AsyncProxyServer:
         self.require_proxy_auth = config.get('require_proxy_auth', 'True').lower() == 'true'
         self.users = {}
         if 'Users' in config:
-            self.users = dict(config['Users'].items())
+            self.users = {
+                username: password
+                for username, password in config['Users'].items()
+                if username.strip() and password
+            }
 
         environment_username = os.environ.get('PROXYCAT_PROXY_USERNAME', '').strip()
         environment_password = os.environ.get('PROXYCAT_PROXY_PASSWORD', '')
@@ -353,16 +357,7 @@ class AsyncProxyServer:
     def _verify_credentials(self, username, password):
         """Verify an inbound proxy username and password without timing-leaky equality."""
         configured_password = self.users.get(username)
-        if configured_password is None:
-            return False
-        if str(configured_password).startswith('{WZ-SCRYPT}'):
-            try:
-                return check_password_hash(
-                    str(configured_password)[len('{WZ-SCRYPT}'):], str(password)
-                )
-            except (ValueError, TypeError):
-                return False
-        return hmac.compare_digest(str(configured_password), str(password))
+        return verify_proxy_password(configured_password, password)
 
     def _authenticate(self, headers):
         """Authenticate an HTTP proxy request and return its username on success."""

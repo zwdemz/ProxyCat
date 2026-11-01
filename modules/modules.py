@@ -1,9 +1,13 @@
-import asyncio, logging, random, httpx, re, os, time
+import asyncio, logging, random, httpx, re, os, time, secrets, threading
+from contextlib import contextmanager
 from configparser import ConfigParser
 from packaging import version
 from colorama import Fore, Style
+from modules.auth import hash_proxy_password
 
 CURRENT_VERSION = "ProxyCat-V2.1.0"
+INITIAL_CREDENTIALS_FILENAME = 'initial_credentials.txt'
+_CONFIG_LOCK = threading.RLock()
 
 class ColoredFormatter(logging.Formatter):
     COLORS = {
@@ -496,22 +500,203 @@ DEFAULT_CONFIG = {
     'language': 'cn'
 }
 
-def load_config(config_file='config/config.ini'):
+
+@contextmanager
+def _configuration_file_lock(config_file):
+    """Serialize configuration bootstrap across threads and sibling processes.
+
+    Args:
+        config_file: Path to the configuration file protected by the lock.
+
+    Yields:
+        Control while the cross-process configuration lock is held.
+
+    Raises:
+        OSError: If the lock file cannot be created or locked.
+    """
+    config_directory = os.path.dirname(os.path.abspath(config_file))
+    os.makedirs(config_directory, exist_ok=True)
+    lock_path = os.path.abspath(config_file) + '.lock'
+
+    with _CONFIG_LOCK, open(lock_path, 'a+b') as lock_file:
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write(b'\0')
+            lock_file.flush()
+        lock_file.seek(0)
+
+        if os.name == 'nt':
+            import msvcrt
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        try:
+            yield
+        finally:
+            lock_file.seek(0)
+            if os.name == 'nt':
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _write_config_atomically(config, config_file):
+    """Persist configuration without exposing a partially written file.
+
+    Args:
+        config: Parsed configuration to persist.
+        config_file: Destination path for the configuration file.
+
+    Raises:
+        OSError: If the temporary file cannot be written or replaced.
+    """
+    temporary_path = f"{config_file}.{secrets.token_hex(8)}.tmp"
     try:
-        config = ConfigParser()
-        config.read(config_file, encoding='utf-8')
-        
-        if not config.has_section('Server'):
-            config.add_section('Server')
-            for key, value in DEFAULT_CONFIG.items():
-                config.set('Server', key, str(value))
-            with open(config_file, 'w', encoding='utf-8') as f:
-                config.write(f)
-        
-        result = dict(config.items('Server'))
-        
-        if config.has_section('Users'):
-            result['Users'] = dict(config.items('Users'))
+        with open(temporary_path, 'w', encoding='utf-8') as temporary_file:
+            config.write(temporary_file)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, config_file)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
+
+def _write_initial_credentials(config_file, credentials):
+    """Write first-run secrets to a local, Git-ignored handoff file.
+
+    Args:
+        config_file: Configuration path used to locate the credentials file.
+        credentials: Newly generated management and proxy credentials.
+
+    Returns:
+        Absolute path to the credentials handoff file.
+
+    Raises:
+        OSError: If the credentials file cannot be written or replaced.
+    """
+    credentials_path = os.path.join(
+        os.path.dirname(os.path.abspath(config_file)), INITIAL_CREDENTIALS_FILENAME
+    )
+    lines = [
+        'ProxyCat initial credentials',
+        'Store these values securely, then delete this file.',
+        '',
+    ]
+    if 'management_token' in credentials:
+        lines.append(f"Management token: {credentials['management_token']}")
+    if 'proxy_username' in credentials:
+        lines.append(f"Proxy username: {credentials['proxy_username']}")
+        lines.append(f"Proxy password: {credentials['proxy_password']}")
+
+    temporary_path = f"{credentials_path}.{secrets.token_hex(8)}.tmp"
+    try:
+        with open(temporary_path, 'w', encoding='utf-8', newline='\n') as credential_file:
+            credential_file.write('\n'.join(lines) + '\n')
+            credential_file.flush()
+            os.fsync(credential_file.fileno())
+        os.replace(temporary_path, credentials_path)
+        try:
+            os.chmod(credentials_path, 0o600)
+        except OSError:
+            pass
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
+    return credentials_path
+
+
+def _bootstrap_auth_credentials(config, config_file):
+    """Generate secure first-run management and proxy credentials when absent.
+
+    Args:
+        config: Parsed ProxyCat configuration.
+        config_file: Destination path used to persist generated values.
+
+    Returns:
+        A mapping containing only the credentials generated during this call.
+
+    Raises:
+        OSError: If generated configuration or credentials cannot be persisted.
+        ValueError: If password hashing fails.
+    """
+    if os.environ.get('PROXYCAT_DISABLE_CREDENTIAL_BOOTSTRAP', '').lower() == 'true':
+        return {}
+
+    generated = {}
+    server_config = config['Server']
+
+    environment_token = os.environ.get('PROXYCAT_MANAGEMENT_TOKEN', '').strip()
+    if not server_config.get('token', '').strip() and not environment_token:
+        management_token = secrets.token_urlsafe(32)
+        server_config['token'] = management_token
+        generated['management_token'] = management_token
+
+    require_proxy_auth = server_config.getboolean('require_proxy_auth', fallback=True)
+    configured_users = {
+        username: password
+        for username, password in config.items('Users')
+        if username.strip() and password
+    } if config.has_section('Users') else {}
+    environment_username = os.environ.get('PROXYCAT_PROXY_USERNAME', '').strip()
+    environment_password = os.environ.get('PROXYCAT_PROXY_PASSWORD', '')
+    environment_credentials_complete = bool(environment_username and environment_password)
+    environment_credentials_partial = bool(environment_username) != bool(environment_password)
+
+    if (
+        require_proxy_auth
+        and not configured_users
+        and not environment_credentials_complete
+        and not environment_credentials_partial
+    ):
+        proxy_username = 'proxycat'
+        proxy_password = secrets.token_urlsafe(24)
+        if not config.has_section('Users'):
+            config.add_section('Users')
+        config.set('Users', proxy_username, hash_proxy_password(proxy_password))
+        generated['proxy_username'] = proxy_username
+        generated['proxy_password'] = proxy_password
+
+    if generated:
+        credentials_path = _write_initial_credentials(config_file, generated)
+        _write_config_atomically(config, config_file)
+        print('[ProxyCat] 已生成随机初始凭据 / Random credentials generated.')
+        print(f"[ProxyCat] 凭据文件 / Credentials file: {credentials_path}")
+
+    return generated
+
+def load_config(config_file='config/config.ini'):
+    """Load ProxyCat configuration and securely initialize missing credentials.
+
+    Args:
+        config_file: Path to the INI configuration file.
+
+    Returns:
+        A flat server configuration mapping with an optional nested Users mapping.
+
+    Error handling:
+        Configuration errors are logged and a safe default mapping is returned. The
+        proxy listener still rejects startup when required credentials are absent.
+    """
+    try:
+        with _configuration_file_lock(config_file):
+            config = ConfigParser()
+            config.read(config_file, encoding='utf-8')
+
+            if not config.has_section('Server'):
+                config.add_section('Server')
+                for key, value in DEFAULT_CONFIG.items():
+                    config.set('Server', key, str(value))
+
+            _bootstrap_auth_credentials(config, config_file)
+
+            result = dict(config.items('Server'))
+
+            if config.has_section('Users'):
+                result['Users'] = dict(config.items('Users'))
 
         environment_token = os.environ.get('PROXYCAT_MANAGEMENT_TOKEN', '').strip()
         if environment_token:

@@ -8,11 +8,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import sys
-from werkzeug.security import generate_password_hash
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+os.environ["PROXYCAT_DISABLE_CREDENTIAL_BOOTSTRAP"] = "true"
 import app as web_app
+os.environ.pop("PROXYCAT_DISABLE_CREDENTIAL_BOOTSTRAP", None)
+from modules.auth import hash_proxy_password
 from modules.proxyserver import AsyncProxyServer
 
 
@@ -148,9 +150,7 @@ class ProxyAuthenticationTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_scrypt_password_hash_is_accepted(self):
-        password_hash = "{WZ-SCRYPT}" + generate_password_hash(
-            "correct-horse", method="scrypt"
-        )
+        password_hash = hash_proxy_password("correct-horse")
         server = self.make_server({"alice": password_hash})
 
         self.assertTrue(server._verify_credentials("alice", "correct-horse"))

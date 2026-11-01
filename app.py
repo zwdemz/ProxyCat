@@ -8,12 +8,12 @@ from datetime import datetime
 import json
 from configparser import ConfigParser
 import werkzeug.serving
-from werkzeug.security import generate_password_hash
 from functools import wraps
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ProxyCat import run_server
+from modules.auth import PASSWORD_HASH_PREFIX, UNCHANGED_PASSWORD, hash_proxy_password
 from modules.modules import CURRENT_VERSION, load_config, check_proxies, get_message, load_ip_list
 from modules.proxyserver import AsyncProxyServer
 import asyncio
@@ -38,8 +38,6 @@ os.makedirs('logs', exist_ok=True)
 log_messages = []
 max_log_messages = 10000
 service_lifecycle_lock = threading.RLock()
-PASSWORD_HASH_PREFIX = '{WZ-SCRYPT}'
-UNCHANGED_PASSWORD = '__PROXYCAT_PASSWORD_UNCHANGED__'
 
 class CustomFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
@@ -665,17 +663,9 @@ def handle_users():
                     if existing_password.startswith(PASSWORD_HASH_PREFIX):
                         normalized_users[username] = existing_password
                     else:
-                        normalized_users[username] = (
-                            PASSWORD_HASH_PREFIX + generate_password_hash(
-                                existing_password, method='scrypt'
-                            )
-                        )
+                        normalized_users[username] = hash_proxy_password(existing_password)
                 else:
-                    normalized_users[username] = (
-                        PASSWORD_HASH_PREFIX + generate_password_hash(
-                            password, method='scrypt'
-                        )
-                    )
+                    normalized_users[username] = hash_proxy_password(password)
 
             users = normalized_users
             
