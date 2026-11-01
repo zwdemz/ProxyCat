@@ -608,6 +608,40 @@ function copyAddr(t) {
   });
 }
 
+var managementAccess = null;
+
+/** Render the authenticated management link and its renewal time; never log credentials. */
+function renderManagementAccess() {
+  var input = $('#management-access-link');
+  if (!managementAccess) {
+    input.val('');
+    $('#copy-management-access').prop('disabled', true);
+    $('#management-access-expiry').text(T().management_access_unavailable);
+    return;
+  }
+  input.val(new URL(managementAccess.access_path, location.origin).href);
+  $('#copy-management-access').prop('disabled', false);
+  var expiry = managementAccess.expires_at;
+  $('#management-access-expiry').text(expiry
+    ? fillTemplate(T().management_access_expires, new Date(expiry * 1000).toLocaleString(lang === 'cn' ? 'zh-CN' : 'en-US'))
+    : T().management_access_manual);
+}
+
+/** Fetch the access link through the protected API and clear stale values on failure. */
+function loadManagementAccess() {
+  return $.ajax({url: '/api/management-access', timeout: 10000, cache: false})
+    .done(function (data) { managementAccess = data; renderManagementAccess(); })
+    .fail(function () { managementAccess = null; renderManagementAccess(); });
+}
+onLangRender(renderManagementAccess);
+
+$(document).on('click', '#copy-management-access', function () {
+  var link = $('#management-access-link').val();
+  if (!link) return;
+  copyToClipboard(link, function () { toast(T().addr_copied, 'success'); },
+    function () { toast(T().copy_failed_manual, 'error'); });
+});
+
 function collectUsers() {
   var users = {};
   $('#user-table tbody tr').each(function () {
@@ -2518,7 +2552,8 @@ function retryConnection() {
 }
 
 $(function () {
-  initTheme(); initLang(); loadConfig(); loadLocalProxies(); loadIpLists(); loadBypassWhitelist(); loadUsers(); checkVer(); initSidebar(); loadAds();
+  initTheme(); initLang(); loadConfig(); loadLocalProxies(); loadIpLists(); loadBypassWhitelist(); loadUsers(); checkVer(); initSidebar(); loadAds(); loadManagementAccess();
+  startPolling('management-access', loadManagementAccess, 30000);
 
   restoreActiveView();
   if (typeof initFieldTips === 'function') initFieldTips();
@@ -2546,7 +2581,7 @@ $(function () {
 
   var _POLLED_PATHS = ['/api/status', '/api/logs', '/api/logs/stats',
                        '/api/logs/domains', '/api/logs/records',
-                       '/api/pool/status'];
+                       '/api/pool/status', '/api/management-access'];
   function isBackgroundPoll(settings) {
     if (!settings || !settings.url) return false;
     var path = String(settings.url).split('?')[0];

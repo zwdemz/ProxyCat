@@ -365,7 +365,13 @@
                                     <div class="fg-hint" data-i18n="web_port_hint">保存后需重启整个应用，不是只重启代理服务</div>
                                     </div>
 
-                                    <div class="settings-note" data-i18n="token_in_file_hint">访问令牌不在面板里修改：改了会让当前地址立刻失效、把你锁在面板外。需要更换时请编辑 config/config.ini 的 [Server] token 后重启。</div>
+                                    <div class="fg">
+                                        <label class="fg-label" for="management-access-link" data-i18n="management_access_link">Token 访问链接</label>
+                                        <input class="fg-input" id="management-access-link" type="text" readonly autocomplete="off" spellcheck="false">
+                                        <button class="btn xs" type="button" id="copy-management-access" data-i18n="management_access_copy">复制访问链接</button>
+                                        <div class="fg-hint" id="management-access-expiry" aria-live="polite"></div>
+                                    </div>
+                                    <div class="settings-note" data-i18n="token_in_file_hint">Token 留空时自动生成，每 15 天更新。请妥善保管访问链接。</div>
 
                             </div>
                         </div>

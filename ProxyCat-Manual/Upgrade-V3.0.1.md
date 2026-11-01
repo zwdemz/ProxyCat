@@ -14,7 +14,9 @@
 
 仓库模板不再附带公开 Token 或公共账号密码。优先使用已配置凭据，环境变量 `PROXYCAT_MANAGEMENT_TOKEN`、`PROXYCAT_PROXY_USERNAME` 和 `PROXYCAT_PROXY_PASSWORD` 可覆盖配置。代理环境用户名和密码必须同时设置。
 
-缺少凭据时自动生成强随机管理 Token 及 `proxycat` 用户，保存在 Git 忽略的 `config/initial_credentials.txt`，配置文件不因生成凭据而改写。该文件在重启时会复用，请限制访问并保留；删除后缺少配置的凭据会重新生成。Web 保存的代理密码使用 scrypt 哈希，API 不回传密码。
+缺少凭据时自动生成强随机管理 Token 及 `proxycat` 用户，保存在 Git 忽略的 `config/initial_credentials.txt`，配置文件不因生成凭据而改写。自动管理 Token 从生成时起每 15 天重新生成，时间戳随文件持久化，重启不会重新计时；旧文件首次升级会保留 Token 并补上计时起点。显式配置或环境变量 Token 不自动轮换，代理用户密码也不会随管理 Token 轮换。请限制访问并保留凭据文件；删除后缺少配置的凭据会重新生成。Web 保存的代理密码使用 scrypt 哈希，API 不回传密码。
+
+“代理配置 → 监听端口”展示当前 Token 访问链接、复制按钮及自动更新时间。链接只向已认证用户提供，不缓存、不记录日志，按当前浏览器域名和端口生成以兼容反向代理。自动轮换后旧访问链接及旧 Cookie 失效，请从凭据文件读取新 Token 重新登录。即使配置未改动，运行中的 Web 服务也会检查并轮换到期 Token。
 
 正式环境启用 HTTPS，并设置 `management_cookie_secure=true`。`require_proxy_auth=true` 为默认策略；强制认证时无有效用户则拒绝监听。不要把本机真实 Token 提交到仓库。
 
