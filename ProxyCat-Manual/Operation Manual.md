@@ -159,12 +159,19 @@ blacklist_file = blacklist.txt
 # blacklist: prioritize blacklist check, IPs in blacklist are rejected directly
 ip_auth_priority = whitelist
 
-# Web 管理页面访问token，留空则无需token(默认为:honmashironeko)
-token = honmashironeko
+# Web 管理页面访问令牌。可通过 PROXYCAT_MANAGEMENT_TOKEN 环境变量覆盖。
+# 留空时管理 API 拒绝访问，不再自动降级为无认证模式。
+token =
 
-# 在[Users]下面是用户管理组，"账号=密码"一行一个，留空时代理无需身份鉴别(默认为:neko=123456)
+# 是否强制对外代理认证。启用后没有用户时代理端口拒绝启动。
+require_proxy_auth = true
+
+# 生产 HTTPS 环境设置为 true，使管理会话 Cookie 仅通过 HTTPS 发送。
+management_cookie_secure = false
+
+# 在[Users]下面配置代理用户，"账号=密码"一行一个。
+# 也可使用 PROXYCAT_PROXY_USERNAME / PROXYCAT_PROXY_PASSWORD 环境变量。
 [Users]
-neko=123456
 ```
 
 ### Web 控制面板

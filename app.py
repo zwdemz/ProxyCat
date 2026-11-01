@@ -1,11 +1,14 @@
-from flask import Flask, render_template, jsonify, request, redirect, url_for, send_from_directory
+from flask import Flask, render_template, jsonify, request, redirect, url_for, send_from_directory, make_response
 import sys
 import os
 import logging
+import hmac
+import re
 from datetime import datetime
 import json
 from configparser import ConfigParser
 import werkzeug.serving
+from werkzeug.security import generate_password_hash
 from functools import wraps
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,6 +37,9 @@ log_file = 'logs/proxycat.log'
 os.makedirs('logs', exist_ok=True)
 log_messages = []
 max_log_messages = 10000
+service_lifecycle_lock = threading.RLock()
+PASSWORD_HASH_PREFIX = '{WZ-SCRYPT}'
+UNCHANGED_PASSWORD = '__PROXYCAT_PASSWORD_UNCHANGED__'
 
 class CustomFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
@@ -70,38 +76,86 @@ class MemoryHandler(logging.Handler):
         if len(log_messages) > max_log_messages:
             log_messages = log_messages[-max_log_messages:]
 
+def get_management_token():
+    """Return the management credential supplied by an API or browser client."""
+    authorization = request.headers.get('Authorization', '')
+    scheme, _, credential = authorization.partition(' ')
+    if scheme.lower() == 'bearer' and credential:
+        return credential.strip()
+
+    header_token = request.headers.get('X-ProxyCat-Token', '')
+    if header_token:
+        return header_token.strip()
+
+    query_token = request.args.get('token', '')
+    if query_token:
+        return query_token
+
+    return request.cookies.get('proxycat_management_token', '')
+
+
+def authorize_management_request():
+    """Validate the management token and return a Flask error response on failure."""
+    configured_token = str(server.config.get('token', '')).strip()
+    if not configured_token:
+        return jsonify({
+            'status': 'error',
+            'message': get_message('management_auth_not_configured', server.language)
+        }), 503
+
+    supplied_token = get_management_token()
+    if not supplied_token or not hmac.compare_digest(supplied_token, configured_token):
+        return jsonify({
+            'status': 'error',
+            'message': get_message('invalid_token', server.language)
+        }), 401
+
+    return None
+
+
 def require_token(f):
+    """Protect a browser route with the configured management credential."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        token = request.args.get('token')
-        config_token = server.config.get('token', '')
-        
-        if not config_token:
-            return f(*args, **kwargs)
-            
-        if not token or token != config_token:
-            return jsonify({
-                'status': 'error',
-                'message': get_message('invalid_token', server.language)
-            }), 401
-            
+        error_response = authorize_management_request()
+        if error_response:
+            return error_response
         return f(*args, **kwargs)
     return decorated_function
+
+
+@app.before_request
+def protect_management_api():
+    """Apply management authorization consistently to every API endpoint."""
+    if request.path == '/api' or request.path.startswith('/api/'):
+        return authorize_management_request()
+    return None
 
 @app.route('/')
 def root():
     token = request.args.get('token')
     if token:
-        return redirect(f'/web?token={token}')
+        return redirect(url_for('web', token=token))
     return redirect('/web')
 
 @app.route('/web')
 @require_token
 def web():
-    return render_template('index.html')
+    response = make_response(render_template('index.html'))
+    if request.args.get('token'):
+        response.set_cookie(
+            'proxycat_management_token',
+            request.args['token'],
+            httponly=True,
+            secure=(
+                request.is_secure
+                or server.config.get('management_cookie_secure', 'False').lower() == 'true'
+            ),
+            samesite='Strict',
+        )
+    return response
 
 @app.route('/api/status')
-@require_token
 def get_status():
     with open('config/config.ini', 'r', encoding='utf-8') as f:
         config_content = f.read()
@@ -125,6 +179,9 @@ def get_status():
         if time_left == float('inf'):
             time_left = -1
     
+    public_server_config = dict(server_config)
+    public_server_config.pop('token', None)
+
     return jsonify({
         'current_proxy': current_proxy,
         'mode': server.mode,
@@ -137,7 +194,7 @@ def get_status():
         'auth_required': server.auth_required,
         'display_level': int(server_config.get('display_level', '1')),
         'service_status': 'running' if server.running else 'stopped',
-        'config': server_config
+        'config': public_server_config
     })
 
 @app.route('/api/config', methods=['POST'])
@@ -328,7 +385,6 @@ def clear_logs():
         })
 
 @app.route('/api/switch_proxy')
-@require_token
 def switch_proxy():
     try:
         result = asyncio.run(server.switch_proxy())
@@ -351,60 +407,61 @@ def switch_proxy():
 
 def start_proxy_service(timeout=5):
     """Start the proxy thread and wait for the listening socket to be ready."""
-    if server.running:
-        return True, None
-
-    old_thread = getattr(server, 'proxy_thread', None)
-    if old_thread and old_thread.is_alive():
-        old_thread.join(timeout=timeout)
-        if old_thread.is_alive():
-            return False, 'Previous proxy service is still shutting down'
-
-    server.stop_server = False
-    server.last_start_error = None
-    server.proxy_thread = threading.Thread(
-        target=lambda: asyncio.run(run_server(server)),
-        daemon=True,
-        name='proxycat-server',
-    )
-    server.proxy_thread.start()
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    with service_lifecycle_lock:
         if server.running:
             return True, None
-        if server.last_start_error:
-            return False, server.last_start_error
-        if not server.proxy_thread.is_alive():
-            break
-        time.sleep(0.05)
 
-    return False, server.last_start_error or 'Timed out waiting for the proxy port to listen'
+        old_thread = getattr(server, 'proxy_thread', None)
+        if old_thread and old_thread.is_alive():
+            old_thread.join(timeout=timeout)
+            if old_thread.is_alive():
+                return False, 'Previous proxy service is still shutting down'
+
+        server.stop_server = False
+        server.last_start_error = None
+        server.proxy_thread = threading.Thread(
+            target=lambda: asyncio.run(run_server(server)),
+            daemon=True,
+            name='proxycat-server',
+        )
+        server.proxy_thread.start()
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if server.running:
+                return True, None
+            if server.last_start_error:
+                return False, server.last_start_error
+            if not server.proxy_thread.is_alive():
+                break
+            time.sleep(0.05)
+
+        return False, server.last_start_error or 'Timed out waiting for the proxy port to listen'
 
 
 def stop_proxy_service(timeout=5):
     """Stop the proxy server on its owning event loop and wait for release."""
-    proxy_thread = getattr(server, 'proxy_thread', None)
-    loop = server.event_loop
+    with service_lifecycle_lock:
+        proxy_thread = getattr(server, 'proxy_thread', None)
+        loop = server.event_loop
 
-    if loop and loop.is_running():
-        future = asyncio.run_coroutine_threadsafe(server.stop(), loop)
-        try:
-            future.result(timeout=timeout)
-        except Exception as e:
-            return False, str(e)
+        if loop and loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(server.stop(), loop)
+            try:
+                future.result(timeout=timeout)
+            except Exception as e:
+                return False, str(e)
 
-    if proxy_thread and proxy_thread.is_alive():
-        proxy_thread.join(timeout=timeout)
-        if proxy_thread.is_alive():
-            return False, 'Timed out waiting for the proxy port to be released'
+        if proxy_thread and proxy_thread.is_alive():
+            proxy_thread.join(timeout=timeout)
+            if proxy_thread.is_alive():
+                return False, 'Timed out waiting for the proxy port to be released'
 
-    server.proxy_thread = None
-    return True, None
+        server.proxy_thread = None
+        return True, None
 
 
 @app.route('/api/service', methods=['POST'])
-@require_token
 def control_service():
     try:
         action = request.json.get('action')
@@ -569,13 +626,60 @@ def check_version():
         })
 
 @app.route('/api/users', methods=['GET', 'POST'])
-@require_token
 def handle_users():
     if request.method == 'POST':
         try:
-            users = request.json.get('users', {})
+            if server.users_from_environment:
+                return jsonify({
+                    'status': 'error',
+                    'message': get_message('proxy_users_managed_by_environment', server.language)
+                }), 409
+
+            request_data = request.get_json(silent=True) or {}
+            users = request_data.get('users', {})
+            if not isinstance(users, dict):
+                raise ValueError('users must be an object')
+            if server.require_proxy_auth and not users:
+                return jsonify({
+                    'status': 'error',
+                    'message': get_message('proxy_auth_users_required', server.language)
+                }), 400
+
             config = ConfigParser()
             config.read('config/config.ini', encoding='utf-8')
+            existing_users = (
+                dict(config.items('Users')) if config.has_section('Users') else {}
+            )
+
+            normalized_users = {}
+            for username, password in users.items():
+                username = str(username).strip()
+                password = str(password)
+                if not username or not password or len(password) > 1024:
+                    raise ValueError(get_message('invalid_proxy_user', server.language))
+                if not re.fullmatch(r'[A-Za-z0-9_.@-]{1,128}', username):
+                    raise ValueError(get_message('invalid_proxy_user', server.language))
+
+                if password == UNCHANGED_PASSWORD:
+                    existing_password = existing_users.get(username)
+                    if existing_password is None:
+                        raise ValueError(get_message('invalid_proxy_user', server.language))
+                    if existing_password.startswith(PASSWORD_HASH_PREFIX):
+                        normalized_users[username] = existing_password
+                    else:
+                        normalized_users[username] = (
+                            PASSWORD_HASH_PREFIX + generate_password_hash(
+                                existing_password, method='scrypt'
+                            )
+                        )
+                else:
+                    normalized_users[username] = (
+                        PASSWORD_HASH_PREFIX + generate_password_hash(
+                            password, method='scrypt'
+                        )
+                    )
+
+            users = normalized_users
             
             sections_to_preserve = {}
             for section in config.sections():
@@ -598,11 +702,13 @@ def handle_users():
                 config.write(f)
             
             server.users = users
-            server.auth_required = bool(users)
+            server.auth_required = server.require_proxy_auth or bool(users)
             
             if hasattr(server, 'proxy_server') and server.proxy_server:
                 server.proxy_server.users = users
-                server.proxy_server.auth_required = bool(users)
+                server.proxy_server.auth_required = (
+                    server.require_proxy_auth or bool(users)
+                )
             
             return jsonify({
                 'status': 'success',
@@ -615,15 +721,13 @@ def handle_users():
             })
     else:
         try:
-            config = ConfigParser()
-            config.read('config/config.ini', encoding='utf-8')
-            users = {}
-            if config.has_section('Users'):
-                users = dict(config.items('Users'))
-            return jsonify({'users': users})
+            return jsonify({
+                'users': sorted(server.users.keys()),
+                'managed_by_environment': server.users_from_environment,
+            })
         except Exception as e:
             logging.error(f"Error getting users: {e}")
-            return jsonify({'users': {}})
+            return jsonify({'users': [], 'managed_by_environment': False})
 
 @app.route('/static/<path:path>')
 def send_static(path):
@@ -641,9 +745,7 @@ if __name__ == '__main__':
     setup_logging()
     web_port = int(config.get('web_port', '5000'))
     web_url = f"http://127.0.0.1:{web_port}"
-    if config.get('token'):
-        web_url += f"/web?token={config.get('token')}"
-    
+
     logging.info(get_message('web_panel_url', server.language, web_url))
     logging.info(get_message('web_panel_notice', server.language))
 

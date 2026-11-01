@@ -1,4 +1,5 @@
-import asyncio, httpx, logging, re, socket, struct, time, base64, random, os
+import asyncio, httpx, logging, re, socket, struct, time, base64, random, os, hmac
+from werkzeug.security import check_password_hash
 from modules.modules import get_message, load_ip_list
 from asyncio import TimeoutError
 from itertools import cycle
@@ -40,10 +41,27 @@ class AsyncProxyServer:
         self.proxy_username = config.get('proxy_username', '')
         self.proxy_password = config.get('proxy_password', '')
         
+        self.require_proxy_auth = config.get('require_proxy_auth', 'True').lower() == 'true'
         self.users = {}
         if 'Users' in config:
             self.users = dict(config['Users'].items())
-        self.auth_required = bool(self.users)
+
+        environment_username = os.environ.get('PROXYCAT_PROXY_USERNAME', '').strip()
+        environment_password = os.environ.get('PROXYCAT_PROXY_PASSWORD', '')
+        self.auth_configuration_error = None
+        self.users_from_environment = bool(environment_username and environment_password)
+        if bool(environment_username) != bool(environment_password):
+            self.auth_configuration_error = get_message(
+                'proxy_auth_environment_incomplete', self.language
+            )
+        elif environment_username and environment_password:
+            self.users = {environment_username: environment_password}
+
+        if self.require_proxy_auth and not self.users:
+            self.auth_configuration_error = get_message(
+                'proxy_auth_users_required', self.language
+            )
+        self.auth_required = self.require_proxy_auth or bool(self.users)
         
         self.proxy_file = os.path.join('config', os.path.basename(config.get('proxy_file', 'ip.txt')))
         self.whitelist_file = os.path.join('config', os.path.basename(config.get('whitelist_file', 'whitelist.txt')))
@@ -174,6 +192,9 @@ class AsyncProxyServer:
         sock = None
 
         try:
+            if self.auth_configuration_error:
+                raise RuntimeError(self.auth_configuration_error)
+
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             if os.name == 'nt' and hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
                 # Windows SO_REUSEADDR can allow another process to bind the
@@ -329,7 +350,22 @@ class AsyncProxyServer:
             logging.error(get_message('whitelist_error', self.language, str(e)))
             return False
 
+    def _verify_credentials(self, username, password):
+        """Verify an inbound proxy username and password without timing-leaky equality."""
+        configured_password = self.users.get(username)
+        if configured_password is None:
+            return False
+        if str(configured_password).startswith('{WZ-SCRYPT}'):
+            try:
+                return check_password_hash(
+                    str(configured_password)[len('{WZ-SCRYPT}'):], str(password)
+                )
+            except (ValueError, TypeError):
+                return False
+        return hmac.compare_digest(str(configured_password), str(password))
+
     def _authenticate(self, headers):
+        """Authenticate an HTTP proxy request and return its username on success."""
         if not self.auth_required:
             return True
             
@@ -338,15 +374,17 @@ class AsyncProxyServer:
             return False
             
         try:
-            scheme, credentials = auth_header.split()
+            scheme, credentials = auth_header.split(None, 1)
             if scheme.lower() != 'basic':
                 return False
                 
-            decoded = base64.b64decode(credentials).decode()
-            username, password = decoded.split(':')
+            decoded = base64.b64decode(credentials, validate=True).decode('utf-8')
+            username, separator, password = decoded.partition(':')
+            if not separator or not username:
+                return False
             
-            if username in self.users and self.users[username] == password:
-                return username, password
+            if self._verify_credentials(username, password):
+                return username
                 
         except Exception:
             pass
@@ -463,7 +501,6 @@ class AsyncProxyServer:
             ),
             timeout=30.0,
             http2=True,
-            verify=False,
             follow_redirects=True
         )
 
@@ -480,9 +517,15 @@ class AsyncProxyServer:
     async def handle_socks5_connection(self, reader, writer):
         try:
             nmethods = ord(await reader.readexactly(1))
-            await reader.readexactly(nmethods)
+            methods = await reader.readexactly(nmethods)
 
-            writer.write(b'\x05\x02' if self.auth_required else b'\x05\x00')
+            selected_method = 0x02 if self.auth_required else 0x00
+            if selected_method not in methods:
+                writer.write(b'\x05\xff')
+                await writer.drain()
+                return
+
+            writer.write(bytes((0x05, selected_method)))
             await writer.drain()
 
             if self.auth_required:
@@ -499,14 +542,14 @@ class AsyncProxyServer:
                 username = username.decode()
                 password = password.decode()
                 
-                if username in self.users and self.users[username] == password:
+                if self._verify_credentials(username, password):
                     peername = writer.get_extra_info('peername')
                     if peername:
                         client_ip = peername[0]
                         client_key = (client_ip, username)
                         if client_key not in self.known_clients:
                             self.known_clients.add(client_key)
-                            logging.info(get_message('new_client_connect', self.language, client_ip, f"{username}:{password}"))
+                            logging.info(get_message('new_client_connect', self.language, client_ip, username))
                 else:
                     writer.write(b'\x01\x01')
                     await writer.drain()
@@ -752,15 +795,15 @@ class AsyncProxyServer:
                     writer.write(b'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="Proxy"\r\n\r\n')
                     await writer.drain()
                     return
-                elif isinstance(auth_result, tuple):
-                    username, password = auth_result
+                elif isinstance(auth_result, str):
+                    username = auth_result
                     peername = writer.get_extra_info('peername')
                     if peername:
                         client_ip = peername[0]
                         client_key = (client_ip, username)
                         if client_key not in self.known_clients:
                             self.known_clients.add(client_key)
-                            logging.info(get_message('new_client_connect', self.language, client_ip, f"{username}:{password}"))
+                            logging.info(get_message('new_client_connect', self.language, client_ip, username))
 
             if method == 'CONNECT':
                 await self._handle_connect(path, reader, writer)
