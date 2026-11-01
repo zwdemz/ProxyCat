@@ -118,7 +118,7 @@ curl -x http://127.0.0.1:1080 --proxy-user '<用户名>:<密码>' https://www.ba
 
 这四条都是**先出症状、后找原因**的典型，完整说明见[使用手册的「部署前必须知道的四件事」](ProxyCat-Manual/Operation%20Manual.md#部署前必须知道的四件事)：
 
-1. **面板打不开，返回 401**：首次访问 `/web?token=<管理Token>`。本分支无公共默认密码，缺少凭据时保存至私有 `config/initial_credentials.txt`；Windows 使用 UTF-8 的 `start.bat`。后续访问使用会话 Cookie，API 也支持 Bearer / `X-ProxyCat-Token`。
+1. **面板打不开，返回 401**：首次访问 `/web?token=<管理Token>`。管理 Token 随机生成，缺少凭据时保存至私有 `config/initial_credentials.txt`；自动创建的代理账户默认密码为 `123456`。Windows 使用 UTF-8 的 `start.bat`。后续访问使用会话 Cookie，API 也支持 Bearer / `X-ProxyCat-Token`。
 2. **容器起来了，却写不进配置或日志**：容器以非 root 运行，UID/GID 必须与宿主 `config/`、`logs/`、`modules/proxypool/data/` 三个目录的属主一致，不同就在 `.env` 里设置 `PUID` / `PGID`。
 3. **重启后丢了最后一批数据**：停止时应用要排空写队列，`stop_grace_period` 已放宽到 60 秒，用 Docker 默认的 10 秒会在排空前被 `SIGKILL`，**请不要改小它**。
 4. **改了 `web_port` 之后容器变成 unhealthy**：健康检查按 `config.ini` 里实际的 `web_port` 现读现探，改完必须重启进程并同步 `docker-compose.yml` 的端口映射。

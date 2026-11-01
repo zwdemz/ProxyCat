@@ -44,7 +44,7 @@ class CredentialBootstrapTests(unittest.TestCase):
             proxy_password = self._value(credentials_text, "Proxy password")
 
             self.assertGreaterEqual(len(management_token), 40)
-            self.assertGreaterEqual(len(proxy_password), 30)
+            self.assertEqual('123456', proxy_password)
             self.assertEqual(management_token, first_config["token"])
             self.assertEqual("proxycat", proxy_username)
             stored_password = first_config["Users"][proxy_username]

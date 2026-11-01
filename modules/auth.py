@@ -7,6 +7,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 PASSWORD_HASH_PREFIX = '{WZ-SCRYPT}'
 UNCHANGED_PASSWORD = '__PROXYCAT_PASSWORD_UNCHANGED__'
+DEFAULT_PROXY_PASSWORD = '123456'
 
 
 def hash_proxy_password(password):

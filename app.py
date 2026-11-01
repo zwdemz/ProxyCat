@@ -36,7 +36,7 @@ import signal
 import atexit
 import hmac
 from urllib.parse import urlencode
-from modules.auth import PASSWORD_HASH_PREFIX, UNCHANGED_PASSWORD, hash_proxy_password
+from modules.auth import DEFAULT_PROXY_PASSWORD, PASSWORD_HASH_PREFIX, UNCHANGED_PASSWORD, hash_proxy_password, verify_proxy_password
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(BASE_DIR)
@@ -1338,6 +1338,8 @@ def handle_users():
         try:
             return jsonify({'status': 'success',
                             'users': {username: UNCHANGED_PASSWORD for username in server.users},
+                            'default_password_users': [username for username, password in server.users.items()
+                                                       if verify_proxy_password(password, DEFAULT_PROXY_PASSWORD)],
                             'managed_by_environment': server.users_from_environment})
         except Exception as e:
             logging.error(f"Error getting users: {e}")
