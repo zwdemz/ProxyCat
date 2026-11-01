@@ -1,0 +1,13 @@
+.git
+.env
+**/__pycache__
+**/*.pyc
+logs
+**/*.db
+**/*.db-shm
+**/*.db-wal
+config/initial_credentials.txt
+config/*.lock
+config/config.ini.backup-*
+modules/proxypool/data/backups
+modules/proxypool/logs

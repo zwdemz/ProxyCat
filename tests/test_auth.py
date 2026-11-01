@@ -52,19 +52,19 @@ class ManagementAuthorizationTests(unittest.TestCase):
     def test_header_bearer_and_legacy_query_tokens_are_supported(self):
         responses = [
             self.client.get(
-                "/api/status",
+                "/api/config",
                 headers={"X-ProxyCat-Token": "management-secret"},
             ),
             self.client.get(
-                "/api/status",
+                "/api/config",
                 headers={"Authorization": "Bearer management-secret"},
             ),
-            self.client.get("/api/status?token=management-secret"),
+            self.client.get("/api/config?token=management-secret"),
         ]
 
         for response in responses:
             self.assertEqual(200, response.status_code)
-            self.assertNotIn("token", response.get_json()["config"])
+            self.assertNotIn("token", response.get_json()["server"])
 
     def test_missing_server_token_fails_closed(self):
         web_app.server.config = {"token": ""}
@@ -81,6 +81,27 @@ class ManagementAuthorizationTests(unittest.TestCase):
         self.assertIn("SameSite=Strict", response.headers["Set-Cookie"])
         self.assertEqual(200, self.client.get("/web").status_code)
 
+    def test_pool_status_uses_the_same_authentication_boundary(self):
+        self.assertEqual(401, self.client.get('/api/pool/status').status_code)
+        response = self.client.get('/api/pool/status', headers={
+            'X-ProxyCat-Token': 'management-secret'})
+        self.assertEqual(200, response.status_code)
+        self.assertFalse(response.get_json()['is_running'])
+
+    def test_unchanged_password_survives_user_updates(self):
+        stored_hash = hash_proxy_password('existing-password')
+        web_app.server.users = {'alice': stored_hash}
+        web_app.server.users_from_environment = False
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / 'config.ini'
+            config_path.write_text('[Server]\ntoken = management-secret\n[Users]\n', encoding='utf-8')
+            with patch.object(web_app, 'CONFIG_INI_PATH', str(config_path)):
+                response = self.client.post('/api/users',
+                    headers={'X-ProxyCat-Token': 'management-secret'},
+                    json={'users': {'alice': web_app.UNCHANGED_PASSWORD}})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(stored_hash, web_app.server.users['alice'])
+
     def test_user_api_hashes_password_and_never_returns_it(self):
         original_directory = os.getcwd()
         web_app.server.users = {}
@@ -95,11 +116,12 @@ class ManagementAuthorizationTests(unittest.TestCase):
                     "[Server]\nrequire_proxy_auth = true\ntoken = management-secret\n\n[Users]\n",
                     encoding="utf-8",
                 )
-                response = self.client.post(
-                    "/api/users",
-                    headers={"X-ProxyCat-Token": "management-secret"},
-                    json={"users": {"alice": "do-not-store-plaintext"}},
-                )
+                with patch.object(web_app, 'CONFIG_INI_PATH', str(Path('config/config.ini').resolve())):
+                    response = self.client.post(
+                        "/api/users",
+                        headers={"X-ProxyCat-Token": "management-secret"},
+                        json={"users": {"alice": "do-not-store-plaintext"}},
+                    )
 
                 self.assertEqual(200, response.status_code)
                 persisted_config = Path("config/config.ini").read_text(encoding="utf-8")
@@ -110,7 +132,7 @@ class ManagementAuthorizationTests(unittest.TestCase):
                     "/api/users",
                     headers={"X-ProxyCat-Token": "management-secret"},
                 )
-                self.assertEqual(["alice"], response.get_json()["users"])
+                self.assertEqual(["alice"], list(response.get_json()["users"]))
                 self.assertNotIn("do-not-store-plaintext", response.get_data(as_text=True))
             finally:
                 os.chdir(original_directory)
@@ -128,6 +150,7 @@ class ProxyAuthenticationTests(unittest.IsolatedAsyncioTestCase):
             "check_proxies": "False",
             "require_proxy_auth": str(require_proxy_auth),
             "proxy_file": "missing-test-file.txt",
+            "exit_wait_timeout": "0",
         }
         if users is not None:
             config["Users"] = users
@@ -139,7 +162,7 @@ class ProxyAuthenticationTests(unittest.IsolatedAsyncioTestCase):
         invalid = base64.b64encode(b"alice:wrong-password").decode()
 
         self.assertEqual(
-            "alice",
+            ("alice", "correct-horse"),
             server._authenticate({"proxy-authorization": f"Basic {valid}"}),
         )
         self.assertFalse(
@@ -296,10 +319,15 @@ class ServiceLifecycleAuthorizationTests(unittest.TestCase):
         web_app.server.auth_required = False
         barrier = threading.Barrier(3)
         results = []
+        original_config = web_app.server.config
+        web_app.server.config = {'token': 'lifecycle-test-token'}
 
         def start_service():
             barrier.wait()
-            results.append(web_app.start_proxy_service(timeout=2))
+            with web_app.app.test_client() as client:
+                response = client.post('/api/service', json={'action': 'start'},
+                                       headers={'X-ProxyCat-Token': 'lifecycle-test-token'})
+                results.append(response.get_json()['status'])
 
         threads = [threading.Thread(target=start_service) for _ in range(2)]
         try:
@@ -309,9 +337,12 @@ class ServiceLifecycleAuthorizationTests(unittest.TestCase):
             for thread in threads:
                 thread.join(timeout=3)
 
-            self.assertEqual([(True, None), (True, None)], sorted(results))
+            self.assertEqual(['success', 'success'], sorted(results))
             self.assertTrue(web_app.server.running)
-            self.assertEqual((True, None), web_app.stop_proxy_service(timeout=2))
+            with web_app.app.test_client() as client:
+                response = client.post('/api/service', json={'action': 'stop'},
+                                       headers={'X-ProxyCat-Token': 'lifecycle-test-token'})
+                self.assertEqual('success', response.get_json()['status'])
 
             rebound = socket.socket()
             try:
@@ -319,7 +350,10 @@ class ServiceLifecycleAuthorizationTests(unittest.TestCase):
             finally:
                 rebound.close()
         finally:
-            web_app.stop_proxy_service(timeout=2)
+            web_app.server.stop_server = True
+            web_app.server.close_listener()
+            web_app._wait_proxy_thread_exit(timeout=3)
+            web_app.server.config = original_config
             web_app.server.port = original_port
             web_app.server.auth_configuration_error = original_auth_error
             web_app.server.require_proxy_auth = original_require_auth

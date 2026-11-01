@@ -29,6 +29,7 @@ class CredentialBootstrapTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            original_config_bytes = config_path.read_bytes()
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("PROXYCAT_MANAGEMENT_TOKEN", None)
                 os.environ.pop("PROXYCAT_PROXY_USERNAME", None)
@@ -49,6 +50,8 @@ class CredentialBootstrapTests(unittest.TestCase):
             stored_password = first_config["Users"][proxy_username]
             self.assertTrue(stored_password.startswith(PASSWORD_HASH_PREFIX))
             self.assertNotIn(proxy_password, config_path.read_text(encoding="utf-8"))
+            self.assertNotIn(management_token, config_path.read_text(encoding="utf-8"))
+            self.assertNotIn(stored_password, config_path.read_text(encoding="utf-8"))
             self.assertTrue(verify_proxy_password(stored_password, proxy_password))
 
             original_credentials = credentials_text
@@ -56,6 +59,7 @@ class CredentialBootstrapTests(unittest.TestCase):
             self.assertEqual(first_config["token"], second_config["token"])
             self.assertEqual(first_config["Users"], second_config["Users"])
             self.assertEqual(original_credentials, credentials_path.read_text(encoding="utf-8"))
+            self.assertEqual(original_config_bytes, config_path.read_bytes())
 
     def test_complete_environment_credentials_skip_generated_file(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
