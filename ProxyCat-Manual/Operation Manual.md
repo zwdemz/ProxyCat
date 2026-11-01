@@ -160,10 +160,10 @@ blacklist_file = blacklist.txt
 ip_auth_priority = whitelist
 
 # Web 管理页面访问令牌。可通过 PROXYCAT_MANAGEMENT_TOKEN 环境变量覆盖。
-# 留空时管理 API 拒绝访问，不再自动降级为无认证模式。
+# 首次启动留空时自动生成，并写入 config/initial_credentials.txt。
 token =
 
-# 是否强制对外代理认证。启用后没有用户时代理端口拒绝启动。
+# 是否强制对外代理认证。启用且没有用户时首次启动自动生成强密码。
 require_proxy_auth = true
 
 # 生产 HTTPS 环境设置为 true，使管理会话 Cookie 仅通过 HTTPS 发送。
@@ -171,6 +171,7 @@ management_cookie_secure = false
 
 # 在[Users]下面配置代理用户，"账号=密码"一行一个。
 # 也可使用 PROXYCAT_PROXY_USERNAME / PROXYCAT_PROXY_PASSWORD 环境变量。
+# 自动生成的代理密码以 scrypt 哈希存储，明文仅写入 initial_credentials.txt。
 [Users]
 ```
 

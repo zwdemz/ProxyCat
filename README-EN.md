@@ -52,7 +52,9 @@ Therefore, **ProxyCat** was born! This tool aims to transform short-term IPs (la
 
 ## Secure Authentication Setup
 
-Management APIs and the public proxy listener require authentication by default. The repository no longer ships public default passwords. Configure a management token and at least one proxy user before deployment.
+Management APIs and the public proxy listener require authentication by default. The repository does not ship public default passwords. You may configure a management token and proxy user before deployment or let the application generate them securely on first startup.
+
+When either Windows launcher or its corresponding Python entry point runs without a management token or proxy user, the first startup generates strong random credentials automatically. Only the proxy password's `scrypt` hash is stored in `config.ini`; the usable initial plaintext credentials are written to the Git-ignored `config/initial_credentials.txt`. Store the credentials securely and then delete that file.
 
 For source deployments, inject credentials through environment variables so they are not written to the repository:
 
@@ -69,7 +71,9 @@ Linux and macOS use the same environment variable names. For Docker, copy `.env.
 docker compose up -d --build
 ```
 
-Management APIs accept `Authorization: Bearer <token>` or `X-ProxyCat-Token: <token>`. The initial browser visit may use `/web?token=<token>`; the service sets an `HttpOnly`, `SameSite=Strict` session cookie, and the page removes the token from the address bar before sending later requests in a header. Production deployments must use HTTPS and set `management_cookie_secure=true`. HTTP proxy clients use `Proxy-Authorization: Basic`, while SOCKS5 clients use username/password authentication. Proxy passwords saved through the web panel are persisted as `scrypt` hashes and are never returned by the API; legacy plaintext values migrate on the next save. When `require_proxy_auth=true` and no valid user is configured, the proxy listener refuses to start.
+Management APIs accept `Authorization: Bearer <token>` or `X-ProxyCat-Token: <token>`. The initial browser visit may use `/web?token=<token>`; the service sets an `HttpOnly`, `SameSite=Strict` session cookie, and the page removes the token from the address bar before sending later requests in a header. Production deployments must use HTTPS and set `management_cookie_secure=true`. HTTP proxy clients use `Proxy-Authorization: Basic`, while SOCKS5 clients use username/password authentication. Proxy passwords saved through the web panel are persisted as `scrypt` hashes and are never returned by the API; legacy plaintext values migrate on the next save. Complete environment credentials take precedence. If only the environment username or password is set, the proxy listener refuses to start instead of running with incomplete authentication.
+
+On Windows, choose exactly one launcher: `app_start.bat` starts both the web panel and proxy service, while `ProxyCat_start.bat` starts console mode only. Both entry points use the same proxy port and must not run together. The scripts switch the console to UTF-8 to prevent garbled Chinese text.
 
 ## Error Troubleshooting
 
