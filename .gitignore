@@ -3,3 +3,11 @@ __pycache__/
 *.py[cod]
 config/initial_credentials.txt
 config/*.lock
+logs/
+*.db
+*.db-shm
+*.db-wal
+modules/proxypool/data/backups/
+modules/proxypool/logs/
+config/config.ini.backup-*
+config/.credentials-*.tmp

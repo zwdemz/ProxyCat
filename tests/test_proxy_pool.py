@@ -3,8 +3,9 @@ import socket
 import threading
 import unittest
 import sys
+import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from modules.proxyserver import AsyncProxyServer
@@ -20,6 +21,7 @@ class ProxyPoolSelectionTests(unittest.IsolatedAsyncioTestCase):
             "check_proxies": "False",
             "require_proxy_auth": "False",
             "proxy_file": "missing-test-file.txt",
+            "exit_wait_timeout": "0",
         })
         server.proxies = ["http://127.0.0.1:18080", "http://127.0.0.1:18081"]
         server.proxy_cycle = iter(server.proxies)
@@ -30,28 +32,36 @@ class ProxyPoolSelectionTests(unittest.IsolatedAsyncioTestCase):
         server = self.make_server()
         server.last_switch_attempt = 0
 
-        switched = await server.switch_proxy()
+        with patch.object(server, '_maintain_exit_pool', new=AsyncMock()), \
+             patch.object(server, '_replace_soonest', new=AsyncMock()) as replace:
+            switched = await server.switch_proxy()
 
         self.assertTrue(switched)
-        self.assertEqual("http://127.0.0.1:18081", server.current_proxy)
+        replace.assert_awaited_once()
 
     async def test_load_balance_selects_next_proxy_without_self_blocking(self):
         server = self.make_server(mode="loadbalance")
 
+        first = await server.get_next_proxy()
         selected = await server.get_next_proxy()
-
-        self.assertEqual("http://127.0.0.1:18081", selected)
+        self.assertEqual(set(server.proxies), {first, selected})
 
     async def test_invalid_proxy_entries_are_excluded_from_file_pool(self):
         server = self.make_server()
-        self.assertFalse(await server._validate_proxy("not-a-proxy"))
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'config').mkdir()
+            path = Path(directory) / 'config' / 'ip.txt'
+            path.write_text('not-a-proxy\nhttp://127.0.0.1:18080\n', encoding='utf-8')
+            server.proxy_file = str(path)
+            with patch('modules.proxyserver._BASE_DIR', directory):
+                self.assertEqual(['http://127.0.0.1:18080'], server._load_file_proxies())
 
     async def test_getip_failures_do_not_stop_the_proxy_service(self):
         server = self.make_server()
-        server.use_getip = True
-
-        with patch("modules.proxyserver.getip.newip", side_effect=ValueError("provider unavailable")):
-            self.assertIsNone(await server._load_getip_proxy())
+        server.proxy_source_mode = 'api'
+        with patch("modules.proxyserver.getip_newip_list", side_effect=ValueError("provider unavailable")):
+            self.assertIsNone(await server._load_api_proxies(1))
+        self.assertIsNotNone(server.last_source_error())
 
 
     async def test_occupied_port_does_not_report_service_running(self):
@@ -113,10 +123,10 @@ class ProxyPoolSelectionTests(unittest.IsolatedAsyncioTestCase):
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
         try:
             for _ in range(100):
-                if server.active_connections:
+                if server._live_connections:
                     break
                 await asyncio.sleep(0.01)
-            self.assertTrue(server.active_connections)
+            self.assertTrue(server._live_connections)
 
             await asyncio.wait_for(server.stop(), timeout=1)
             await asyncio.wait_for(start_task, timeout=1)
@@ -160,7 +170,7 @@ class ProxyPoolSelectionTests(unittest.IsolatedAsyncioTestCase):
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
         try:
             future = asyncio.run_coroutine_threadsafe(
-                server.stop(), server.event_loop
+                server.stop(), server._event_loop
             )
             await asyncio.wait_for(asyncio.wrap_future(future), timeout=1)
         finally:
